@@ -356,6 +356,68 @@ function renderSidebar(t: Tab) {
   }
 }
 
+// A display unit groups refs at a commit: a local branch is merged with its
+// matching remote (same name -> one badge with both icons).
+interface RefUnit {
+  name: string;
+  local: boolean;
+  remote: boolean;
+  tag: boolean;
+  isHead: boolean;
+  ref: RefInfo; // the ref to act on (local preferred)
+}
+function refUnits(refsHere: RefInfo[]): RefUnit[] {
+  const locals = refsHere.filter((r) => r.kind === "local");
+  const remotes = refsHere.filter((r) => r.kind === "remote");
+  const tags = refsHere.filter((r) => r.kind === "tag");
+  const usedRemote = new Set<string>();
+  const units: RefUnit[] = [];
+  for (const l of locals) {
+    const rem = remotes.find(
+      (r) => r.name.split("/").slice(1).join("/") === l.name
+    );
+    if (rem) usedRemote.add(rem.full);
+    units.push({ name: l.name, local: true, remote: !!rem, tag: false, isHead: l.is_head, ref: l });
+  }
+  for (const r of remotes) {
+    if (usedRemote.has(r.full)) continue;
+    units.push({ name: r.name, local: false, remote: true, tag: false, isHead: false, ref: r });
+  }
+  for (const tg of tags) {
+    units.push({ name: tg.name, local: false, remote: false, tag: true, isHead: false, ref: tg });
+  }
+  return units;
+}
+
+function unitBadge(u: RefUnit): string {
+  const icons =
+    (u.local ? icon("local") : "") +
+    (u.remote ? icon("remote") : "") +
+    (u.tag ? icon("tag") : "");
+  const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
+  const check = u.isHead ? `<span class="bcheck">✓</span>` : "";
+  return (
+    `<span class="badge ${cls}${u.isHead ? " current" : ""}" ` +
+    `data-refname="${escapeHtml(u.ref.name)}" data-refkind="${u.ref.kind}">` +
+    `${check}${icons}${escapeHtml(u.name)}</span>`
+  );
+}
+
+// primary badge (current branch if present, else first) + "+N" pill
+function buildRefColumn(refsHere: RefInfo[]): string {
+  const units = refUnits(refsHere);
+  if (!units.length) return "";
+  let pi = units.findIndex((u) => u.isHead);
+  if (pi < 0) pi = 0;
+  let html = unitBadge(units[pi]);
+  const others = units.filter((_, i) => i !== pi);
+  if (others.length) {
+    const title = others.map((u) => u.name).join("\n");
+    html += `<span class="refplus" title="${escapeHtml(title)}">+${others.length}</span>`;
+  }
+  return html;
+}
+
 function renderGraph(t: Tab) {
   const repo = t.repo;
   const built = layout(t.nodes);
@@ -501,21 +563,9 @@ function renderGraph(t: Tab) {
       const c = n.commit!;
       const isHead = c.hash === repo.head;
       refHtml =
-        (isHead
-          ? repo.head_branch
-            ? `<span class="badge head">HEAD</span>`
-            : `<span class="badge detached">HEAD · detached</span>`
-          : "") +
-        (refsByHash.get(c.hash) ?? [])
-          .map(
-            (r) =>
-              `<span class="badge ${r.kind}" data-refname="${escapeHtml(
-                r.name
-              )}" data-refkind="${r.kind}">${icon(r.kind)}${escapeHtml(
-                r.name
-              )}</span>`
-          )
-          .join("");
+        (isHead && !repo.head_branch
+          ? `<span class="badge detached">HEAD · detached</span>`
+          : "") + buildRefColumn(refsByHash.get(c.hash) ?? []);
       msgHtml =
         `<span class="summary">${escapeHtml(c.summary)}</span>` +
         `<span class="author">${escapeHtml(c.author)}</span>` +
@@ -552,6 +602,28 @@ function renderGraph(t: Tab) {
         selectNode(n);
         showMenu(e.clientX, e.clientY, commitMenu(hash, refsHere, repo));
       });
+      // "+N" pill -> dropdown of all refs at this commit (checkout any)
+      const plus = row.querySelector(".refplus");
+      if (plus) {
+        plus.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const me = e as MouseEvent;
+          showMenu(
+            me.clientX,
+            me.clientY,
+            refsHere.map((r) => {
+              const isRemote = r.kind === "remote";
+              const target = isRemote
+                ? r.name.split("/").slice(1).join("/")
+                : r.name;
+              return {
+                label: `Checkout ${r.name}`,
+                action: () => doCheckout(target, isRemote ? r.name : undefined),
+              };
+            })
+          );
+        });
+      }
     } else if (n.kind === "stash") {
       const s = n.stash!;
       row.addEventListener("contextmenu", (e) => {

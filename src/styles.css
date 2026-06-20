@@ -321,6 +321,22 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .badge.remote { background: #3b2a4d; color: #d6a8ff; }
 .badge.tag { background: #4d3f2a; color: #ffcf8f; }
 .badge.head { background: #ffffff; color: #0a0a12; font-weight: 700; }
+.badge.current { outline: 1px solid var(--accent); font-weight: 700; }
+.bcheck { color: #7ee787; font-weight: 700; margin-right: 2px; }
+.refplus {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 6px;
+  margin-left: 2px;
+  border-radius: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+}
+.refplus:hover { border-color: var(--accent); color: var(--fg); }
 .badge.detached { background: #5a2020; color: #ff8f8f; font-weight: 700; }
 .badge.stash { background: #4d3f2a; color: #ffcf8f; }
 .badge.wip { background: #5a3320; color: #ff9d5c; font-weight: 700; }
