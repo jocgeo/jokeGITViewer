@@ -76,6 +76,7 @@ interface Tab {
   nodes: GNode[];
   placed: Placed[];
   fingerprint?: string; // cheap repo-state signature for auto-refresh
+  remoteTags?: Set<string>; // tag names known to exist on origin
 }
 
 // ---- layout constants ----
@@ -389,18 +390,42 @@ function refUnits(refsHere: RefInfo[]): RefUnit[] {
   return units;
 }
 
+let gRemoteTags = new Set<string>(); // tags on origin, for the active render
+
 function unitBadge(u: RefUnit): string {
-  const icons =
+  let icons =
     (u.local ? icon("local") : "") +
     (u.remote ? icon("remote") : "") +
     (u.tag ? icon("tag") : "");
+  let extra = "";
+  if (u.tag) {
+    if (gRemoteTags.has(u.name)) {
+      icons += icon("remote"); // also on remote
+    } else {
+      extra = `<span class="tagpush" title="local only — not pushed to origin">↑</span>`;
+    }
+  }
   const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
   const check = u.isHead ? `<span class="bcheck">✓</span>` : "";
   return (
     `<span class="badge ${cls}${u.isHead ? " current" : ""}" ` +
     `data-refname="${escapeHtml(u.ref.name)}" data-refkind="${u.ref.kind}">` +
-    `${check}${icons}${escapeHtml(u.name)}</span>`
+    `${check}${icons}${escapeHtml(u.name)}${extra}</span>`
   );
+}
+
+// fetch the set of tags on origin (network), then re-render to mark badges
+async function refreshRemoteTags(t: Tab) {
+  try {
+    const tags = await invoke<string[]>("remote_tags", { path: t.repo.path });
+    t.remoteTags = new Set(tags);
+    if (cur() === t) {
+      gRemoteTags = t.remoteTags;
+      renderGraph(t);
+    }
+  } catch {
+    /* offline / no origin — leave tags as local-only */
+  }
 }
 
 // branches: primary (current if present, else first) + "+N" pill.
@@ -429,6 +454,7 @@ function buildRefColumn(refsHere: RefInfo[]): string {
 
 function renderGraph(t: Tab) {
   const repo = t.repo;
+  gRemoteTags = t.remoteTags ?? new Set();
   const built = layout(t.nodes);
   t.placed = built.placed;
   const { placed, maxLane } = built;
@@ -774,6 +800,7 @@ async function loadRepo(path: string, silent = false) {
     renderTabs();
     renderActive();
     saveSession();
+    refreshRemoteTags(tab);
   } catch (e) {
     setStatus("");
     if (silent) console.warn("skip repo", path, String(e));
@@ -1386,6 +1413,7 @@ async function reloadActive(statusMsg?: string) {
     }).catch(() => t.fingerprint);
     renderActive();
     if (statusMsg) setStatus(statusMsg);
+    refreshRemoteTags(t);
   } catch (e) {
     alert("Reload failed:\n" + String(e));
   }
@@ -1730,6 +1758,46 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
   const upstream = isRemote ? r.name : undefined;
   const verb = isTag ? "tag" : isRemote ? "remote branch" : "branch";
   const items: MenuItem[] = [];
+
+  // tags get their own menu (push/delete to/from remote)
+  if (isTag) {
+    const onRemote = (cur()?.remoteTags ?? new Set()).has(r.name);
+    items.push({ label: `Checkout tag ${r.name}`, action: () => doCheckout(r.name) });
+    items.push({ separator: true });
+    if (!onRemote) {
+      items.push({
+        label: `Push tag ${r.name} to origin`,
+        action: () => runAction(invoke("push_tag", { path, name: r.name }), `Pushed tag ${r.name}`),
+      });
+    } else {
+      items.push({ label: `✓ on origin` });
+    }
+    items.push({
+      label: `Delete tag ${r.name} (local)`,
+      action: async () => {
+        if (await confirmModal(`Delete local tag ${r.name}?`))
+          runAction(invoke("delete_tag", { path, name: r.name }), `Deleted tag ${r.name}`);
+      },
+    });
+    if (onRemote) {
+      items.push({
+        label: `Delete tag ${r.name} on origin`,
+        action: async () => {
+          if (await confirmModal(`Delete tag ${r.name} on origin?`))
+            runAction(invoke("delete_remote_tag", { path, name: r.name }), `Deleted ${r.name} on origin`);
+        },
+      });
+    }
+    items.push({ separator: true });
+    items.push({ label: "Create branch here…", action: () => doCreateBranch(path, hash) });
+    items.push({ label: "Copy tag name", action: () => copyText(r.name) });
+    items.push({ label: "Copy commit SHA", action: () => copyText(hash) });
+    items.push({
+      label: "Compare commit against working directory",
+      action: () => compareCommitToWorking(path, hash),
+    });
+    return items;
+  }
 
   items.push({ label: `Checkout ${verb} ${target}`, action: () => doCheckout(target, upstream) });
   if (curBranch && r.name !== curBranch && !isTag) {
