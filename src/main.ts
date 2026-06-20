@@ -76,6 +76,7 @@ interface Tab {
   nodes: GNode[];
   placed: Placed[];
   fingerprint?: string; // cheap repo-state signature for auto-refresh
+  remoteTags?: Set<string>; // tag names known to exist on origin
 }
 
 // ---- layout constants ----
@@ -218,6 +219,9 @@ function switchTab(i: number) {
   renderTabs();
   renderActive();
   saveSession();
+  // fetch remote-tag status the first time this tab is viewed
+  const t = cur();
+  if (t && !t.remoteTags) refreshRemoteTags(t);
 }
 
 function closeTab(i: number) {
@@ -389,18 +393,42 @@ function refUnits(refsHere: RefInfo[]): RefUnit[] {
   return units;
 }
 
+let gRemoteTags = new Set<string>(); // tags on origin, for the active render
+
 function unitBadge(u: RefUnit): string {
-  const icons =
+  let icons =
     (u.local ? icon("local") : "") +
     (u.remote ? icon("remote") : "") +
     (u.tag ? icon("tag") : "");
+  let extra = "";
+  if (u.tag) {
+    if (gRemoteTags.has(u.name)) {
+      icons += icon("remote"); // also on remote
+    } else {
+      extra = `<span class="tagpush" title="local only — not pushed to origin">↑</span>`;
+    }
+  }
   const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
   const check = u.isHead ? `<span class="bcheck">✓</span>` : "";
   return (
     `<span class="badge ${cls}${u.isHead ? " current" : ""}" ` +
     `data-refname="${escapeHtml(u.ref.name)}" data-refkind="${u.ref.kind}">` +
-    `${check}${icons}${escapeHtml(u.name)}</span>`
+    `${check}${icons}${escapeHtml(u.name)}${extra}</span>`
   );
+}
+
+// fetch the set of tags on origin (network), then re-render to mark badges
+async function refreshRemoteTags(t: Tab) {
+  try {
+    const tags = await invoke<string[]>("remote_tags", { path: t.repo.path });
+    t.remoteTags = new Set(tags);
+    if (cur() === t) {
+      gRemoteTags = t.remoteTags;
+      renderGraph(t);
+    }
+  } catch {
+    /* offline / no origin — leave tags as local-only */
+  }
 }
 
 // branches: primary (current if present, else first) + "+N" pill.
@@ -429,6 +457,7 @@ function buildRefColumn(refsHere: RefInfo[]): string {
 
 function renderGraph(t: Tab) {
   const repo = t.repo;
+  gRemoteTags = t.remoteTags ?? new Set();
   const built = layout(t.nodes);
   t.placed = built.placed;
   const { placed, maxLane } = built;
@@ -659,6 +688,28 @@ function clearDetail() {
   $("conflict-panel").classList.add("hidden");
 }
 
+// faintly show which branch the clicked commit belongs to, on its ref row
+async function showBranchHint(t: Tab, hash: string) {
+  let list: string[];
+  try {
+    list = await invoke<string[]>("branches_containing", { path: t.repo.path, hash });
+  } catch {
+    return;
+  }
+  if (!list.length || t.selected !== hash) return;
+  const pick = list.includes(t.repo.head_branch) ? t.repo.head_branch : list[0];
+  const rowRef = document.querySelector(
+    `.crow[data-id="${cssEsc(hash)}"] .col-ref`
+  ) as HTMLElement | null;
+  if (!rowRef) return;
+  // skip if a real badge for this branch is already shown on the row
+  if (rowRef.querySelector(`.badge[data-refname="${cssEsc(pick)}"]`)) return;
+  const span = document.createElement("span");
+  span.className = "badge local ghost";
+  span.innerHTML = `${icon("local")}${escapeHtml(pick)}`;
+  rowRef.appendChild(span);
+}
+
 async function selectNode(n: GNode | null, scroll = false) {
   const t = cur();
   if (!t || !n) return;
@@ -668,6 +719,9 @@ async function selectNode(n: GNode | null, scroll = false) {
   document.querySelectorAll(".crow").forEach((el) => {
     el.classList.toggle("selected", (el as HTMLElement).dataset.id === n.id);
   });
+  // clear any previous "which branch" hint
+  document.querySelectorAll(".col-ref .ghost").forEach((e) => e.remove());
+  if (n.kind === "commit") showBranchHint(t, n.commit!.hash);
   if (scroll) {
     const el = document.querySelector(
       `.crow[data-id="${cssEsc(n.id)}"]`
@@ -774,6 +828,7 @@ async function loadRepo(path: string, silent = false) {
     renderTabs();
     renderActive();
     saveSession();
+    refreshRemoteTags(tab);
   } catch (e) {
     setStatus("");
     if (silent) console.warn("skip repo", path, String(e));
@@ -798,15 +853,29 @@ async function restoreSession() {
     data = JSON.parse(localStorage.getItem(LS_SESSION) ?? "null");
   } catch {}
   if (!data || !data.paths?.length) return;
-  for (const p of data.paths) {
-    await loadRepo(p, true); // silent: skip repos that vanished
+  // open all repos in parallel (much faster than one-after-another)
+  const loaded = await Promise.all(
+    data.paths.map((p) =>
+      invoke<RepoData>("open_repo", { path: p }).catch(() => null)
+    )
+  );
+  for (const repo of loaded) {
+    if (!repo) continue; // skip repos that vanished
+    tabs.push({
+      repo,
+      selected: repo.head || (repo.wip ? WIP_ID : null),
+      nodes: buildNodes(repo),
+      placed: [],
+    });
   }
-  if (tabs.length) {
-    active = Math.min(Math.max(0, data.active ?? 0), tabs.length - 1);
-    renderTabs();
-    renderActive();
-    saveSession();
-  }
+  if (!tabs.length) return;
+  active = Math.min(Math.max(0, data.active ?? 0), tabs.length - 1);
+  renderTabs();
+  renderActive();
+  saveSession();
+  // only the active tab needs its remote-tag status fetched up front
+  const t = cur();
+  if (t) refreshRemoteTags(t);
 }
 
 function getCollapsed(): Set<string> {
@@ -1326,12 +1395,13 @@ async function pollActive() {
 // enable/disable + tooltip the top toolbar based on repo state
 function setToolbar(repo: RepoData | null) {
   const set = (id: string, disabled: boolean, title?: string) => {
-    const b = $(id) as HTMLButtonElement;
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (!b) return; // button may not exist
     b.disabled = disabled;
     if (title !== undefined) b.title = title;
   };
   if (!repo) {
-    ["fetch-btn", "pull-btn", "push-btn", "branch-btn", "stash-btn", "pop-btn", "terminal-btn"].forEach(
+    ["fetch-btn", "pull-btn", "push-btn", "branch-btn", "stash-btn", "terminal-btn"].forEach(
       (id) => set(id, true)
     );
     return;
@@ -1361,12 +1431,6 @@ function setToolbar(repo: RepoData | null) {
   set("branch-btn", conflict);
   set("stash-btn", conflict,
     conflict ? "Cannot stash during a conflict" : "Stash all changes including untracked\ngit stash --include-untracked");
-  set("pop-btn", conflict || repo.stashes.length === 0,
-    conflict
-      ? "Cannot pop during a conflict"
-      : repo.stashes.length === 0
-      ? "No stashes to pop"
-      : "Apply and remove the latest stash\ngit stash pop");
   set("terminal-btn", false);
 }
 
@@ -1386,6 +1450,7 @@ async function reloadActive(statusMsg?: string) {
     }).catch(() => t.fingerprint);
     renderActive();
     if (statusMsg) setStatus(statusMsg);
+    refreshRemoteTags(t);
   } catch (e) {
     alert("Reload failed:\n" + String(e));
   }
@@ -1457,11 +1522,6 @@ async function doStashBtn() {
   const t = cur();
   if (!t) return;
   runAction(invoke("stash_push", { path: t.repo.path }), "Stashed changes");
-}
-async function doPop() {
-  const t = cur();
-  if (!t) return;
-  runAction(invoke("stash_pop", { path: t.repo.path }), "Popped stash");
 }
 async function doTerminal() {
   const t = cur();
@@ -1731,6 +1791,46 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
   const verb = isTag ? "tag" : isRemote ? "remote branch" : "branch";
   const items: MenuItem[] = [];
 
+  // tags get their own menu (push/delete to/from remote)
+  if (isTag) {
+    const onRemote = (cur()?.remoteTags ?? new Set()).has(r.name);
+    items.push({ label: `Checkout tag ${r.name}`, action: () => doCheckout(r.name) });
+    items.push({ separator: true });
+    if (!onRemote) {
+      items.push({
+        label: `Push tag ${r.name} to origin`,
+        action: () => runAction(invoke("push_tag", { path, name: r.name }), `Pushed tag ${r.name}`),
+      });
+    } else {
+      items.push({ label: `✓ on origin` });
+    }
+    items.push({
+      label: `Delete tag ${r.name} (local)`,
+      action: async () => {
+        if (await confirmModal(`Delete local tag ${r.name}?`))
+          runAction(invoke("delete_tag", { path, name: r.name }), `Deleted tag ${r.name}`);
+      },
+    });
+    if (onRemote) {
+      items.push({
+        label: `Delete tag ${r.name} on origin`,
+        action: async () => {
+          if (await confirmModal(`Delete tag ${r.name} on origin?`))
+            runAction(invoke("delete_remote_tag", { path, name: r.name }), `Deleted ${r.name} on origin`);
+        },
+      });
+    }
+    items.push({ separator: true });
+    items.push({ label: "Create branch here…", action: () => doCreateBranch(path, hash) });
+    items.push({ label: "Copy tag name", action: () => copyText(r.name) });
+    items.push({ label: "Copy commit SHA", action: () => copyText(hash) });
+    items.push({
+      label: "Compare commit against working directory",
+      action: () => compareCommitToWorking(path, hash),
+    });
+    return items;
+  }
+
   items.push({ label: `Checkout ${verb} ${target}`, action: () => doCheckout(target, upstream) });
   if (curBranch && r.name !== curBranch && !isTag) {
     items.push({ separator: true });
@@ -1960,7 +2060,6 @@ window.addEventListener("DOMContentLoaded", () => {
   $("push-btn").addEventListener("click", doPush);
   $("branch-btn").addEventListener("click", doBranch);
   $("stash-btn").addEventListener("click", doStashBtn);
-  $("pop-btn").addEventListener("click", doPop);
   $("terminal-btn").addEventListener("click", doTerminal);
   $("stage-all").addEventListener("click", doStageAll);
   $("unstage-all").addEventListener("click", doUnstageAll);

@@ -830,6 +830,52 @@ fn create_tag(path: String, name: String, hash: String) -> Result<(), String> {
     git(&path, &["tag", &name, &hash]).map(|_| ())
 }
 
+// local branches that contain the given commit (for the "which branch" hint)
+#[tauri::command]
+fn branches_containing(path: String, hash: String) -> Result<Vec<String>, String> {
+    let raw = git(
+        &path,
+        &["branch", "--contains", &hash, "--format=%(refname:short)"],
+    )?;
+    Ok(raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with('('))
+        .collect())
+}
+
+// names of tags that exist on origin (hits the network; may be empty offline)
+#[tauri::command]
+fn remote_tags(path: String) -> Result<Vec<String>, String> {
+    let raw = git(&path, &["ls-remote", "--tags", "origin"])?;
+    let mut set = std::collections::BTreeSet::new();
+    for line in raw.lines() {
+        if let Some(idx) = line.find("refs/tags/") {
+            let name = line[idx + "refs/tags/".len()..].trim_end_matches("^{}");
+            if !name.is_empty() {
+                set.insert(name.to_string());
+            }
+        }
+    }
+    Ok(set.into_iter().collect())
+}
+
+#[tauri::command]
+fn push_tag(path: String, name: String) -> Result<String, String> {
+    git(&path, &["push", "origin", &name])?;
+    Ok(format!("Pushed tag {name}"))
+}
+
+#[tauri::command]
+fn delete_tag(path: String, name: String) -> Result<(), String> {
+    git(&path, &["tag", "-d", &name]).map(|_| ())
+}
+
+#[tauri::command]
+fn delete_remote_tag(path: String, name: String) -> Result<(), String> {
+    git(&path, &["push", "origin", "--delete", &format!("refs/tags/{name}")]).map(|_| ())
+}
+
 #[tauri::command]
 fn create_tag_annotated(
     path: String,
@@ -894,7 +940,12 @@ pub fn run() {
             resolve_take,
             resolve_write,
             merge_abort,
-            merge_continue
+            merge_continue,
+            remote_tags,
+            push_tag,
+            delete_tag,
+            delete_remote_tag,
+            branches_containing
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

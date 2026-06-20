@@ -44,14 +44,36 @@ button:hover { border-color: var(--accent); }
 
 button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 
-#topbar { gap: 6px; }
+#topbar { gap: 6px; padding: 4px 12px; }
+.tb-left { flex: 1 1 0; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tb-center { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+.tb-right { flex: 1 1 0; display: flex; justify-content: flex-end; min-width: 0; }
+#repo-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .tb-sep {
   width: 1px;
-  align-self: stretch;
+  height: 32px;
   background: var(--border);
-  margin: 2px 4px;
+  margin: 0 4px;
 }
-.tbtn { min-width: 56px; }
+.tbi { width: 18px; height: 18px; display: block; }
+
+/* toolbar action buttons: icon stacked over label */
+.tbtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 58px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+#open-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* context menu */
 #ctxmenu {
@@ -323,6 +345,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .badge.head { background: #ffffff; color: #0a0a12; font-weight: 700; }
 .badge.current { outline: 1px solid var(--accent); font-weight: 700; }
 .bcheck { color: #7ee787; font-weight: 700; margin-right: 2px; }
+.tagpush { margin-left: 3px; color: #e3b341; font-weight: 700; } /* local-only tag */
+.badge.ghost { opacity: .42; font-style: italic; } /* "which branch" hint */
 .refplus {
   display: inline-flex;
   align-items: center;
