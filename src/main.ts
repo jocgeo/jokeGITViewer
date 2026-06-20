@@ -403,18 +403,27 @@ function unitBadge(u: RefUnit): string {
   );
 }
 
-// primary badge (current branch if present, else first) + "+N" pill
+// branches: primary (current if present, else first) + "+N" pill.
+// tags: always shown as their own badges so they're easy to spot.
 function buildRefColumn(refsHere: RefInfo[]): string {
   const units = refUnits(refsHere);
   if (!units.length) return "";
-  let pi = units.findIndex((u) => u.isHead);
-  if (pi < 0) pi = 0;
-  let html = unitBadge(units[pi]);
-  const others = units.filter((_, i) => i !== pi);
-  if (others.length) {
-    const title = others.map((u) => u.name).join("\n");
-    html += `<span class="refplus" title="${escapeHtml(title)}">+${others.length}</span>`;
+  const branches = units.filter((u) => !u.tag);
+  const tags = units.filter((u) => u.tag);
+
+  let html = "";
+  if (branches.length) {
+    let pi = branches.findIndex((u) => u.isHead);
+    if (pi < 0) pi = 0;
+    html += unitBadge(branches[pi]);
+    const others = branches.filter((_, i) => i !== pi);
+    if (others.length) {
+      const title = others.map((u) => u.name).join("\n");
+      html += `<span class="refplus" title="${escapeHtml(title)}">+${others.length}</span>`;
+    }
   }
+  // all tags, always visible (rendered last = nearest the graph)
+  html += tags.map(unitBadge).join("");
   return html;
 }
 
