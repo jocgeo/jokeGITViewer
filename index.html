@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>jokeGITViewer</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <button id="open-btn">Open repo…</button>
+        <span class="tb-sep"></span>
+        <button class="tbtn" id="fetch-btn" disabled
+          title="Fetch all remotes and prune deleted branches&#10;git fetch --all --prune">Fetch</button>
+        <button class="tbtn" id="pull-btn" disabled>Pull</button>
+        <button class="tbtn" id="push-btn" disabled>Push</button>
+        <span class="tb-sep"></span>
+        <button class="tbtn" id="branch-btn" disabled
+          title="Create a new branch from HEAD and switch to it&#10;git checkout -b <name>">Branch</button>
+        <button class="tbtn" id="stash-btn" disabled
+          title="Stash all changes including untracked&#10;git stash --include-untracked">Stash</button>
+        <button class="tbtn" id="pop-btn" disabled
+          title="Apply and remove the latest stash&#10;git stash pop">Pop</button>
+        <span class="tb-sep"></span>
+        <button class="tbtn" id="terminal-btn" disabled
+          title="Open a terminal in the repository folder">Terminal</button>
+        <span class="tb-sep"></span>
+        <span id="repo-path" class="muted">No repo open</span>
+        <span id="status" class="muted"></span>
+      </header>
+
+      <div id="tabstrip"></div>
+
+      <div id="body">
+        <aside id="sidebar">
+          <div class="side-section" data-sec="local">
+            <div class="side-head">
+              <span class="chev">▸</span><span class="sicon"></span>
+              <span class="lbl">Local</span><span class="count" id="count-local">0</span>
+            </div>
+            <ul id="locals" class="reflist"></ul>
+          </div>
+          <div class="side-section" data-sec="remote">
+            <div class="side-head">
+              <span class="chev">▸</span><span class="sicon"></span>
+              <span class="lbl">Remote</span><span class="count" id="count-remote">0</span>
+            </div>
+            <ul id="remotes" class="reflist"></ul>
+          </div>
+          <div class="side-section" data-sec="stash">
+            <div class="side-head">
+              <span class="chev">▸</span><span class="sicon"></span>
+              <span class="lbl">Stashes</span><span class="count" id="count-stash">0</span>
+            </div>
+            <ul id="stashes" class="reflist"></ul>
+          </div>
+          <div class="side-section" data-sec="tag">
+            <div class="side-head">
+              <span class="chev">▸</span><span class="sicon"></span>
+              <span class="lbl">Tags</span><span class="count" id="count-tag">0</span>
+            </div>
+            <ul id="tags" class="reflist"></ul>
+          </div>
+        </aside>
+
+        <main id="graphpane">
+          <div id="col-headers">
+            <div class="ch ch-ref">Branch / Tag</div>
+            <div class="ch ch-graph">Graph</div>
+            <div class="ch ch-msg">Commit message</div>
+          </div>
+          <div id="scroll">
+            <svg id="graph-svg"></svg>
+            <div id="rows"></div>
+            <div id="empty" class="empty">Open a repository to view its commit graph.</div>
+          </div>
+          <div id="diffview" class="hidden">
+            <div id="diffview-head">
+              <span id="diffview-title"></span>
+              <button id="diffview-close" class="mini">✕ Close</button>
+            </div>
+            <div id="diff-main">
+              <div id="diffview-body"></div>
+              <div id="diff-minimap"></div>
+            </div>
+          </div>
+        </main>
+
+        <section id="detail">
+          <div id="detail-empty" class="muted">Select a commit.</div>
+
+          <div id="commit-panel" class="hidden">
+            <div class="cp-head">Working tree changes</div>
+
+            <div class="cp-section">
+              <div class="cp-title">
+                <span>Unstaged files (<span id="c-unstaged-n">0</span>)</span>
+                <button id="stage-all" class="mini">Stage all</button>
+              </div>
+              <ul id="c-unstaged" class="filelist"></ul>
+            </div>
+
+            <div class="cp-section">
+              <div class="cp-title">
+                <span>Staged files (<span id="c-staged-n">0</span>)</span>
+                <button id="unstage-all" class="mini">Unstage all</button>
+              </div>
+              <ul id="c-staged" class="filelist"></ul>
+            </div>
+
+            <label class="cp-amend">
+              <input type="checkbox" id="c-amend" /> Amend previous commit
+            </label>
+            <input id="c-summary" class="cp-input" placeholder="Commit summary" />
+            <textarea id="c-desc" class="cp-input cp-desc" placeholder="Description (optional)"></textarea>
+            <button id="c-commit" class="cp-commit" disabled>Commit</button>
+          </div>
+
+          <div id="detail-body" class="hidden">
+            <div id="d-summary" class="d-summary"></div>
+            <div id="d-meta" class="d-meta"></div>
+            <div class="d-title">Changed files</div>
+            <ul id="d-files" class="filelist"></ul>
+          </div>
+        </section>
+      </div>
+    </div>
+  </body>
+</html>
