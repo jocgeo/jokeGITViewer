@@ -86,10 +86,52 @@
               <div id="diff-minimap"></div>
             </div>
           </div>
+          <div id="mergeview" class="hidden">
+            <div id="mergeview-head">
+              <span id="mergeview-title"></span>
+              <span class="mv-actions">
+                <button class="mini" id="mv-ours">Use ours (all)</button>
+                <button class="mini" id="mv-theirs">Use theirs (all)</button>
+                <button class="mini" id="mv-edit">Edit text</button>
+                <button class="mini" id="mv-save">Save resolved</button>
+                <button class="mini" id="mv-close">✕</button>
+              </span>
+            </div>
+            <div id="mergeview-body">
+              <div class="mv-pane">
+                <div class="mv-label mv-ours">◆ Ours (current branch)</div>
+                <div id="mv-ours-code" class="mv-code"></div>
+              </div>
+              <div class="mv-pane">
+                <div class="mv-label mv-theirs">◆ Theirs (incoming)</div>
+                <div id="mv-theirs-code" class="mv-code"></div>
+              </div>
+              <div class="mv-pane">
+                <div class="mv-label">Result</div>
+                <div id="mv-result" class="mv-code"></div>
+                <textarea id="mv-output" class="hidden" spellcheck="false"></textarea>
+              </div>
+            </div>
+          </div>
         </main>
 
         <section id="detail">
           <div id="detail-empty" class="muted">Select a commit.</div>
+
+          <div id="conflict-panel" class="hidden">
+            <div class="cp-head conflict-head">⚠ <span id="cf-kind"></span> conflicts</div>
+            <div class="cp-section">
+              <div class="cp-title"><span>Conflicted files (<span id="cf-n">0</span>)</span></div>
+              <ul id="cf-files" class="filelist"></ul>
+            </div>
+            <div id="cf-allresolved" class="muted hidden">
+              All conflicts resolved — click Finish to complete.
+            </div>
+            <div class="cp-btnrow">
+              <button id="cf-abort" class="cp-abort">Abort</button>
+              <button id="cf-finish" class="cp-commit" disabled>Finish</button>
+            </div>
+          </div>
 
           <div id="commit-panel" class="hidden">
             <div class="cp-head">Working tree changes</div>

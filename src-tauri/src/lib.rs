@@ -2,6 +2,7 @@
 // Talks to the local `git` CLI (no native libgit2 build needed).
 
 use serde::Serialize;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Serialize)]
@@ -48,6 +49,13 @@ pub struct WipStatus {
 }
 
 #[derive(Serialize)]
+pub struct ConflictState {
+    active: bool,        // an operation (merge/rebase/…) is in progress
+    kind: String,        // "merge" | "rebase" | "cherry-pick" | "revert" | ""
+    files: Vec<String>,  // currently unmerged (conflicted) files
+}
+
+#[derive(Serialize)]
 pub struct RepoData {
     path: String,
     head: String,        // current commit hash (empty if none)
@@ -56,6 +64,7 @@ pub struct RepoData {
     commits: Vec<Commit>,
     stashes: Vec<StashEntry>,
     wip: Option<WipStatus>,
+    conflict: ConflictState,
 }
 
 // Unit + record separators used in git --pretty format.
@@ -79,11 +88,40 @@ fn git(repo: &str, args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !out.status.success() {
-        return Err(format!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        // some git messages are printed to stdout, not stderr
+        let msg = if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err.to_string()
+        };
+        return Err(format!("git {:?} failed: {msg}", args));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// like git(), but with no interactive editor (for --continue style commands)
+fn git_no_editor(repo: &str, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true");
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -92,6 +130,40 @@ fn is_repo(path: &str) -> bool {
     git(path, &["rev-parse", "--is-inside-work-tree"])
         .map(|s| s.trim() == "true")
         .unwrap_or(false)
+}
+
+fn load_conflict(path: &str) -> ConflictState {
+    let gitdir = git(path, &["rev-parse", "--git-dir"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| ".git".to_string());
+    let base = if Path::new(&gitdir).is_absolute() {
+        gitdir
+    } else {
+        format!("{path}/{gitdir}")
+    };
+    let has = |p: &str| Path::new(&format!("{base}/{p}")).exists();
+
+    let kind = if has("MERGE_HEAD") {
+        "merge"
+    } else if has("rebase-merge") || has("rebase-apply") {
+        "rebase"
+    } else if has("CHERRY_PICK_HEAD") {
+        "cherry-pick"
+    } else if has("REVERT_HEAD") {
+        "revert"
+    } else {
+        ""
+    };
+
+    let files: Vec<String> = git(path, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+
+    ConflictState {
+        active: !kind.is_empty() || !files.is_empty(),
+        kind: kind.to_string(),
+        files,
+    }
 }
 
 fn load_refs(repo: &str) -> Result<Vec<RefInfo>, String> {
@@ -280,6 +352,7 @@ fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
     let commits = load_commits(&path, limit.unwrap_or(2000))?;
     let stashes = load_stashes(&path).unwrap_or_default();
     let wip = load_wip(&path, &head);
+    let conflict = load_conflict(&path);
 
     Ok(RepoData {
         path,
@@ -289,7 +362,75 @@ fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
         commits,
         stashes,
         wip,
+        conflict,
     })
+}
+
+#[derive(Serialize)]
+pub struct ConflictVersions {
+    ours: String,   // current branch version (stage 2)
+    theirs: String, // incoming version (stage 3)
+    merged: String, // working-tree file with conflict markers
+}
+
+#[tauri::command]
+fn conflict_versions(path: String, file: String) -> Result<ConflictVersions, String> {
+    let ours = git(&path, &["show", &format!(":2:{file}")]).unwrap_or_default();
+    let theirs = git(&path, &["show", &format!(":3:{file}")]).unwrap_or_default();
+    let merged = std::fs::read_to_string(format!("{path}/{file}")).unwrap_or_default();
+    Ok(ConflictVersions { ours, theirs, merged })
+}
+
+// take one whole side for a conflicted file, then mark resolved (git add)
+#[tauri::command]
+fn resolve_take(path: String, file: String, side: String) -> Result<(), String> {
+    let flag = match side.as_str() {
+        "ours" => "--ours",
+        "theirs" => "--theirs",
+        _ => return Err("side must be ours/theirs".to_string()),
+    };
+    git(&path, &["checkout", flag, "--", &file])?;
+    git(&path, &["add", "--", &file]).map(|_| ())
+}
+
+// write resolved content to the file, then mark resolved
+#[tauri::command]
+fn resolve_write(path: String, file: String, content: String) -> Result<(), String> {
+    std::fs::write(format!("{path}/{file}"), content).map_err(|e| e.to_string())?;
+    git(&path, &["add", "--", &file]).map(|_| ())
+}
+
+#[tauri::command]
+fn merge_abort(path: String, kind: String) -> Result<(), String> {
+    let cmd = match kind.as_str() {
+        "rebase" => vec!["rebase", "--abort"],
+        "cherry-pick" => vec!["cherry-pick", "--abort"],
+        "revert" => vec!["revert", "--abort"],
+        _ => vec!["merge", "--abort"],
+    };
+    git(&path, &cmd).map(|_| ())
+}
+
+// finish the operation once all conflicts are resolved
+#[tauri::command]
+fn merge_continue(path: String, kind: String) -> Result<(), String> {
+    let r = match kind.as_str() {
+        "rebase" => git_no_editor(&path, &["rebase", "--continue"]),
+        "cherry-pick" => git_no_editor(&path, &["cherry-pick", "--continue"]),
+        "revert" => git_no_editor(&path, &["revert", "--continue"]),
+        _ => git_no_editor(&path, &["commit", "--no-edit"]),
+    };
+    match r {
+        Ok(_) => Ok(()),
+        // a rebase --continue can surface the NEXT commit's conflicts; not an error
+        Err(e) => {
+            if load_conflict(&path).active {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -569,8 +710,7 @@ fn push(path: String) -> Result<String, String> {
 #[tauri::command]
 fn pull(path: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    git(&path, &["pull"])?;
-    Ok(s)
+    run_or_conflict(&path, &["pull"], s)
 }
 
 #[tauri::command]
@@ -632,32 +772,42 @@ fn stash_if_dirty(path: &str) -> Result<bool, String> {
     Ok(dirty)
 }
 
+// run an op; a resulting conflict is NOT an error — the UI handles it.
+fn run_or_conflict(path: &str, args: &[&str], stashed: bool) -> Result<bool, String> {
+    match git(path, args) {
+        Ok(_) => Ok(stashed),
+        Err(e) => {
+            if load_conflict(path).active {
+                Ok(stashed) // conflicts -> reload into the resolver
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn merge_ref(path: String, reference: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    git(&path, &["merge", "--no-edit", &reference])?;
-    Ok(s)
+    run_or_conflict(&path, &["merge", "--no-edit", &reference], s)
 }
 
 #[tauri::command]
 fn rebase_onto(path: String, reference: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    git(&path, &["rebase", &reference])?;
-    Ok(s)
+    run_or_conflict(&path, &["rebase", &reference], s)
 }
 
 #[tauri::command]
 fn cherry_pick(path: String, hash: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    git(&path, &["cherry-pick", &hash])?;
-    Ok(s)
+    run_or_conflict(&path, &["cherry-pick", &hash], s)
 }
 
 #[tauri::command]
 fn revert_commit(path: String, hash: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    git(&path, &["revert", "--no-edit", &hash])?;
-    Ok(s)
+    run_or_conflict(&path, &["revert", "--no-edit", &hash], s)
 }
 
 #[tauri::command]
@@ -739,7 +889,12 @@ pub fn run() {
             open_terminal,
             stash_apply,
             stash_pop_at,
-            stash_drop
+            stash_drop,
+            conflict_versions,
+            resolve_take,
+            resolve_write,
+            merge_abort,
+            merge_continue
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

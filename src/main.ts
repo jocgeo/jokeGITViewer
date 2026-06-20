@@ -35,6 +35,11 @@ interface WipStatus {
   unstaged: number;
   untracked: number;
 }
+interface ConflictState {
+  active: boolean;
+  kind: string; // merge | rebase | cherry-pick | revert | ""
+  files: string[];
+}
 interface RepoData {
   path: string;
   head: string;
@@ -43,6 +48,7 @@ interface RepoData {
   commits: Commit[];
   stashes: StashEntry[];
   wip: WipStatus | null;
+  conflict: ConflictState;
 }
 
 // ---- unified graph node ----
@@ -255,6 +261,19 @@ function renderActive() {
   );
   renderSidebar(t);
   renderGraph(t);
+
+  // in a conflicted state -> show the conflict panel, not the usual detail
+  if (repo.conflict.active) {
+    $("detail-empty").classList.add("hidden");
+    $("detail-body").classList.add("hidden");
+    $("commit-panel").classList.add("hidden");
+    $("conflict-panel").classList.remove("hidden");
+    renderConflictPanel(t);
+    setStatus(`⚠ ${repo.conflict.kind} in progress — ${repo.conflict.files.length} conflict(s)`);
+    return;
+  }
+  $("conflict-panel").classList.add("hidden");
+
   if (t.selected) {
     const n = t.nodes.find((x) => x.id === t.selected);
     if (n) selectNode(n, true);
@@ -556,6 +575,7 @@ function clearDetail() {
   $("detail-empty").classList.remove("hidden");
   $("detail-body").classList.add("hidden");
   $("commit-panel").classList.add("hidden");
+  $("conflict-panel").classList.add("hidden");
 }
 
 async function selectNode(n: GNode | null, scroll = false) {
@@ -786,9 +806,260 @@ async function refreshCommitFiles() {
 
 // open a file diff in the MAIN center area (line numbers + highlighting)
 function showDiffView(on: boolean) {
+  $("mergeview").classList.add("hidden");
   $("diffview").classList.toggle("hidden", !on);
   $("col-headers").classList.toggle("hidden", on);
   $("scroll").classList.toggle("hidden", on);
+}
+function showMergeView(on: boolean) {
+  $("diffview").classList.add("hidden");
+  $("mergeview").classList.toggle("hidden", !on);
+  $("col-headers").classList.toggle("hidden", on);
+  $("scroll").classList.toggle("hidden", on);
+}
+
+// ---- merge conflict resolution ----
+let mvFile = ""; // file currently open in the merge resolver
+type Choice = "ours" | "theirs" | "both" | null;
+interface Seg {
+  kind: "normal" | "conflict";
+  lines?: string[];
+  ours?: string[];
+  theirs?: string[];
+  choice?: Choice;
+}
+let mvSegments: Seg[] = [];
+let mvManual = false; // raw-textarea editing mode
+
+function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+// render one side (ours/theirs) as a full numbered file with the conflicting
+// lines highlighted. Reconstructed from the parsed segments so it lines up
+// exactly with the conflicts shown in the Result pane.
+function renderMergeSide(elId: string, side: "ours" | "theirs") {
+  let n = 0;
+  let html = "";
+  for (const s of mvSegments) {
+    if (s.kind === "normal") {
+      for (const l of s.lines!) {
+        n++;
+        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+      }
+    } else {
+      for (const l of (side === "ours" ? s.ours! : s.theirs!)) {
+        n++;
+        html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+      }
+    }
+  }
+  $(elId).innerHTML = html;
+}
+
+// parse a file with conflict markers into normal/conflict segments
+function parseConflicts(text: string): Seg[] {
+  const lines = splitLines(text);
+  const segs: Seg[] = [];
+  let normal: string[] = [];
+  const flush = () => {
+    if (normal.length) {
+      segs.push({ kind: "normal", lines: normal });
+      normal = [];
+    }
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (l.startsWith("<<<<<<<")) {
+      flush();
+      const ours: string[] = [];
+      const theirs: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("=======") && !lines[i].startsWith("|||||||")) {
+        ours.push(lines[i++]);
+      }
+      if (i < lines.length && lines[i].startsWith("|||||||")) {
+        i++;
+        while (i < lines.length && !lines[i].startsWith("=======")) i++; // skip base
+      }
+      if (i < lines.length && lines[i].startsWith("=======")) i++;
+      while (i < lines.length && !lines[i].startsWith(">>>>>>>")) {
+        theirs.push(lines[i++]);
+      }
+      if (i < lines.length && lines[i].startsWith(">>>>>>>")) i++;
+      segs.push({ kind: "conflict", ours, theirs, choice: null });
+    } else {
+      normal.push(l);
+      i++;
+    }
+  }
+  flush();
+  return segs;
+}
+
+function mvAllResolved(): boolean {
+  return mvSegments.every((s) => s.kind !== "conflict" || s.choice);
+}
+
+function buildMergedContent(): string {
+  const out: string[] = [];
+  for (const s of mvSegments) {
+    if (s.kind === "normal") out.push(...s.lines!);
+    else if (s.choice === "ours") out.push(...s.ours!);
+    else if (s.choice === "theirs") out.push(...s.theirs!);
+    else if (s.choice === "both") out.push(...s.ours!, ...s.theirs!);
+  }
+  return out.join("\n") + "\n";
+}
+
+function mvUpdateSave() {
+  ($("mv-save") as HTMLButtonElement).disabled = !mvManual && !mvAllResolved();
+}
+
+function renderMergeResult() {
+  const el = $("mv-result");
+  let n = 0;
+  let html = "";
+  mvSegments.forEach((s, idx) => {
+    if (s.kind === "normal") {
+      for (const l of s.lines!) {
+        n++;
+        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+      }
+      return;
+    }
+    const c = s.choice;
+    html +=
+      `<div class="confbar" data-idx="${idx}">` +
+      `<span class="confbar-label">conflict</span>` +
+      `<button data-act="ours" class="mini ${c === "ours" ? "sel" : ""}">ours</button>` +
+      `<button data-act="theirs" class="mini ${c === "theirs" ? "sel" : ""}">theirs</button>` +
+      `<button data-act="both" class="mini ${c === "both" ? "sel" : ""}">both</button>` +
+      `</div>`;
+    const showOurs = c === null || c === "ours" || c === "both";
+    const showTheirs = c === null || c === "theirs" || c === "both";
+    if (showOurs)
+      for (const l of s.ours!) {
+        const num = c ? String(++n) : "";
+        html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+      }
+    if (showTheirs)
+      for (const l of s.theirs!) {
+        const num = c ? String(++n) : "";
+        html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+      }
+  });
+  el.innerHTML = html;
+  el.querySelectorAll<HTMLElement>(".confbar button").forEach((b) => {
+    b.addEventListener("click", () => {
+      const idx = +(b.closest(".confbar") as HTMLElement).dataset.idx!;
+      mvSegments[idx].choice = b.dataset.act as Choice;
+      renderMergeResult();
+      mvUpdateSave();
+    });
+  });
+}
+
+function resolveAll(side: Choice) {
+  mvSegments.forEach((s) => {
+    if (s.kind === "conflict") s.choice = side;
+  });
+  if (mvManual) toggleManual(); // back to rendered view
+  renderMergeResult();
+  mvUpdateSave();
+}
+
+function toggleManual() {
+  mvManual = !mvManual;
+  const ta = $("mv-output") as HTMLTextAreaElement;
+  if (mvManual) ta.value = buildMergedContent();
+  ta.classList.toggle("hidden", !mvManual);
+  $("mv-result").classList.toggle("hidden", mvManual);
+  ($("mv-edit") as HTMLButtonElement).textContent = mvManual ? "Visual" : "Edit text";
+  mvUpdateSave();
+}
+
+function renderConflictPanel(t: Tab) {
+  const c = t.repo.conflict;
+  $("cf-kind").textContent = c.kind || "merge";
+  const ul = $("cf-files");
+  ul.innerHTML = "";
+  c.files.forEach((f) => {
+    const li = document.createElement("li");
+    li.innerHTML =
+      `<span class="fstatus M">!</span><span class="fpath">${escapeHtml(f)}</span>`;
+    li.addEventListener("click", () => openMergeView(f));
+    ul.appendChild(li);
+  });
+  $("cf-n").textContent = String(c.files.length);
+  $("cf-allresolved").classList.toggle("hidden", c.files.length !== 0);
+  ($("cf-finish") as HTMLButtonElement).disabled = c.files.length !== 0;
+}
+
+async function openMergeView(file: string) {
+  const t = cur();
+  if (!t) return;
+  mvFile = file;
+  mvManual = false;
+  $("mergeview-title").textContent = file;
+  $("mv-ours-code").innerHTML = "";
+  $("mv-theirs-code").innerHTML = "";
+  $("mv-result").innerHTML = "loading…";
+  $("mv-output").classList.add("hidden");
+  $("mv-result").classList.remove("hidden");
+  ($("mv-edit") as HTMLButtonElement).textContent = "Edit text";
+  showMergeView(true);
+  try {
+    const v = await invoke<{ ours: string; theirs: string; merged: string }>(
+      "conflict_versions",
+      { path: t.repo.path, file }
+    );
+    ($("mv-output") as HTMLTextAreaElement).value = v.merged;
+    mvSegments = parseConflicts(v.merged);
+    renderMergeSide("mv-ours-code", "ours");
+    renderMergeSide("mv-theirs-code", "theirs");
+    renderMergeResult();
+    mvUpdateSave();
+  } catch (e) {
+    $("mv-result").textContent = String(e);
+  }
+}
+
+async function saveResolved() {
+  const t = cur();
+  if (!t || !mvFile) return;
+  const content = mvManual
+    ? ($("mv-output") as HTMLTextAreaElement).value
+    : buildMergedContent();
+  try {
+    await invoke("resolve_write", { path: t.repo.path, file: mvFile, content });
+    mvFile = "";
+    await reloadActive("Resolved file");
+  } catch (e) {
+    alert("Save failed:\n" + String(e));
+  }
+}
+
+async function abortMerge() {
+  const t = cur();
+  if (!t) return;
+  if (!(await confirmModal(`Abort the ${t.repo.conflict.kind || "merge"}?`))) return;
+  runAction(
+    invoke("merge_abort", { path: t.repo.path, kind: t.repo.conflict.kind }),
+    "Aborted"
+  );
+}
+
+async function finishMerge() {
+  const t = cur();
+  if (!t) return;
+  runAction(
+    invoke("merge_continue", { path: t.repo.path, kind: t.repo.conflict.kind }),
+    "Completed"
+  );
 }
 
 function showDiffText(title: string, diff: string) {
@@ -986,25 +1257,33 @@ function setToolbar(repo: RepoData | null) {
   }
   const br = repo.head_branch;
   const detached = !br;
-  set("fetch-btn", false);
+  const conflict = repo.conflict.active;
+  set("fetch-btn", conflict);
   set(
     "pull-btn",
-    detached,
-    detached
+    detached || conflict,
+    conflict
+      ? "Resolve the conflict first"
+      : detached
       ? "Pull unavailable — detached HEAD"
       : `Pull origin/${br} into ${br} (fast-forward/merge)\ngit pull`
   );
   set(
     "push-btn",
-    detached,
-    detached
+    detached || conflict,
+    conflict
+      ? "Resolve the conflict first"
+      : detached
       ? "Push unavailable — detached HEAD"
       : `Push the current branch to origin/${br}\ngit push -u origin ${br}`
   );
-  set("branch-btn", false);
-  set("stash-btn", false);
-  set("pop-btn", repo.stashes.length === 0,
-    repo.stashes.length === 0
+  set("branch-btn", conflict);
+  set("stash-btn", conflict,
+    conflict ? "Cannot stash during a conflict" : "Stash all changes including untracked\ngit stash --include-untracked");
+  set("pop-btn", conflict || repo.stashes.length === 0,
+    conflict
+      ? "Cannot pop during a conflict"
+      : repo.stashes.length === 0
       ? "No stashes to pop"
       : "Apply and remove the latest stash\ngit stash pop");
   set("terminal-btn", false);
@@ -1608,6 +1887,14 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  // merge resolver
+  $("mv-ours").addEventListener("click", () => resolveAll("ours"));
+  $("mv-theirs").addEventListener("click", () => resolveAll("theirs"));
+  $("mv-edit").addEventListener("click", toggleManual);
+  $("mv-save").addEventListener("click", saveResolved);
+  $("mv-close").addEventListener("click", () => showDiffView(false));
+  $("cf-abort").addEventListener("click", abortMerge);
+  $("cf-finish").addEventListener("click", finishMerge);
   setupCollapsible();
   renderTabs();
   restoreSession();
