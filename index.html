@@ -16,6 +16,10 @@
             <span>Open</span>
           </button>
           <span id="repo-path" class="muted">No repo open</span>
+          <div class="search-box">
+            <input id="search" class="search" type="text" placeholder="Search branch / message / hash / tag…" />
+            <div id="search-results" class="hidden"></div>
+          </div>
         </div>
 
         <div class="tb-center">
@@ -141,6 +145,7 @@
         </main>
 
         <section id="detail">
+          <button id="detail-close" title="Close panel">✕</button>
           <div id="detail-empty" class="muted">Select a commit.</div>
 
           <div id="conflict-panel" class="hidden">

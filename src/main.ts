@@ -81,6 +81,8 @@ interface Tab {
   fingerprint?: string; // cheap repo-state signature for auto-refresh
   remoteTags?: Set<string>; // tag names known to exist on origin
   hint?: { hash: string; branch: string }; // "which branch" ghost for selected commit
+  hidden?: Set<string>; // ref keys hidden from the graph
+  stale?: boolean; // loaded from cache, needs a background refresh
 }
 
 // ---- layout constants ----
@@ -107,23 +109,114 @@ const cur = (): Tab | null => (active >= 0 ? tabs[active] : null);
 // ---- DOM helpers ----
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
-const svgEl = (name: string) =>
-  document.createElementNS("http://www.w3.org/2000/svg", name);
 
 // ---- build unified node list (commits + stashes + WIP) ----
+// ---- search (branches, tags, commit hashes, messages, authors) ----
+interface SearchHit {
+  label: string;
+  sub: string;
+  iconKind: string;
+  hash: string; // node id to select
+}
+function runSearch(q: string) {
+  const box = $("search-results");
+  const t = cur();
+  const query = q.trim().toLowerCase();
+  if (!t || !query) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  const repo = t.repo;
+  const hits: SearchHit[] = [];
+
+  for (const r of repo.refs) {
+    if (r.name.toLowerCase().includes(query)) {
+      hits.push({ label: r.name, sub: r.kind, iconKind: r.kind, hash: r.target });
+    }
+  }
+  for (const c of repo.commits) {
+    if (hits.length > 60) break;
+    if (
+      c.hash.toLowerCase().startsWith(query) ||
+      c.summary.toLowerCase().includes(query) ||
+      c.author.toLowerCase().includes(query)
+    ) {
+      hits.push({ label: c.summary, sub: `${c.hash.slice(0, 8)} · ${c.author}`, iconKind: "", hash: c.hash });
+    }
+  }
+
+  if (!hits.length) {
+    box.innerHTML = `<div class="sr-empty muted">No matches</div>`;
+    box.classList.remove("hidden");
+    return;
+  }
+  box.innerHTML = hits
+    .slice(0, 50)
+    .map(
+      (h, i) =>
+        `<div class="sr-item" data-hash="${cssEsc(h.hash)}" data-i="${i}">` +
+        `<span class="sr-icon">${h.iconKind ? icon(h.iconKind) : ""}</span>` +
+        `<span class="sr-label">${escapeHtml(h.label)}</span>` +
+        `<span class="sr-sub">${escapeHtml(h.sub)}</span></div>`
+    )
+    .join("");
+  box.classList.remove("hidden");
+  box.querySelectorAll<HTMLElement>(".sr-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const node = findById(t, el.dataset.hash!);
+      if (node) selectNode(node, true);
+      closeSearch();
+    });
+  });
+}
+function closeSearch() {
+  const box = $("search-results");
+  box.classList.add("hidden");
+  box.innerHTML = "";
+}
+
 const refKey = (r: { kind: string; name: string }) => `${r.kind}:${r.name}`;
+
+function toggleBranchHidden(t: Tab, key: string) {
+  if (!t.hidden) t.hidden = new Set();
+  if (t.hidden.has(key)) t.hidden.delete(key);
+  else t.hidden.add(key);
+  t.nodes = buildNodes(t.repo, t.hidden);
+  renderGraph(t);
+  renderSidebar(t);
+}
 
 function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
   // when branches are hidden, keep only commits still reachable from a visible
   // ref / HEAD / stash base / WIP parent
   let commits = repo.commits;
   if (hidden && hidden.size) {
+    // hiding a branch also hides its local/remote twin (same short name),
+    // otherwise the twin keeps the commits visible.
+    const remoteShort = (name: string) => name.split("/").slice(1).join("/");
+    const hiddenLocal = new Set(
+      [...hidden].filter((k) => k.startsWith("local:")).map((k) => k.slice(6))
+    );
+    const hiddenRemote = new Set(
+      [...hidden].filter((k) => k.startsWith("remote:")).map((k) => remoteShort(k.slice(7)))
+    );
+    const isHidden = (r: RefInfo) => {
+      if (hidden.has(refKey(r))) return true;
+      if (r.kind === "local" && hiddenRemote.has(r.name)) return true;
+      if (r.kind === "remote" && hiddenLocal.has(remoteShort(r.name))) return true;
+      return false;
+    };
+
     const map = new Map(repo.commits.map((c) => [c.hash, c]));
     const tips: string[] = [];
-    for (const r of repo.refs) if (!hidden.has(refKey(r))) tips.push(r.target);
-    if (repo.head) tips.push(repo.head);
+    for (const r of repo.refs) if (!isHidden(r)) tips.push(r.target);
+    // keep HEAD only if its branch isn't the one being hidden
+    const headHidden =
+      !!repo.head_branch && hiddenLocal.has(repo.head_branch);
+    if (repo.head && !headHidden) tips.push(repo.head);
     for (const s of repo.stashes) if (s.parents[0]) tips.push(s.parents[0]);
-    if (repo.wip?.parent) tips.push(repo.wip.parent);
+    if (repo.wip?.parent && !headHidden) tips.push(repo.wip.parent);
     const seen = new Set<string>();
     const stack = [...tips];
     while (stack.length) {
@@ -250,6 +343,7 @@ function switchTab(i: number) {
   // fetch remote-tag status the first time this tab is viewed
   const t = cur();
   if (t && !t.remoteTags) refreshRemoteTags(t);
+  if (t && t.stale) reloadActive(); // refresh cached tab on first view
 }
 
 function closeTab(i: number) {
@@ -334,6 +428,7 @@ function renderActive() {
     $("tags").innerHTML = "";
     ($("graph-svg") as unknown as SVGSVGElement).innerHTML = "";
     $("rows").innerHTML = "";
+    gctx = null;
     $("empty").classList.remove("hidden");
     setToolbar(null);
     clearDetail();
@@ -352,6 +447,7 @@ function renderActive() {
 
   // in a conflicted state -> show the conflict panel, not the usual detail
   if (repo.conflict.active) {
+    $("detail").classList.remove("collapsed");
     $("detail-empty").classList.add("hidden");
     $("detail-body").classList.add("hidden");
     $("commit-panel").classList.add("hidden");
@@ -398,12 +494,18 @@ function renderSidebar(t: Tab) {
         if (remoteOnly) li.classList.add("remoteonly");
 
         const color = COLORS[Math.abs(hashStr(r.target)) % COLORS.length];
+        const canHide = kind === "local" || kind === "remote";
+        const isHidden = canHide && (t.hidden?.has(refKey(r)) ?? false);
+        if (isHidden) li.classList.add("branch-hidden");
         li.innerHTML =
           `<span class="ricon">${icon(kind)}</span>` +
           `<span class="dot" style="background:${color}"></span>` +
           `<span class="rname">${escapeHtml(r.name)}</span>` +
           (r.is_head ? `<span class="here">HEAD</span>` : "") +
-          (remoteOnly ? `<span class="dl" title="not checked out locally">⬇</span>` : "");
+          (remoteOnly ? `<span class="dl" title="not checked out locally">⬇</span>` : "") +
+          (canHide
+            ? `<span class="eye" title="${isHidden ? "Show in graph" : "Hide from graph"}">${icon(isHidden ? "eyeoff" : "eye")}</span>`
+            : "");
         li.title = r.full + (remoteOnly ? "  (not checked out locally)" : "");
         li.addEventListener("click", () => {
           if (r.target) selectNode(findById(t, r.target) ?? null, true);
@@ -411,6 +513,10 @@ function renderSidebar(t: Tab) {
         li.addEventListener("contextmenu", (e) => {
           e.preventDefault();
           showMenu(e.clientX, e.clientY, branchMenu(r, repo));
+        });
+        li.querySelector(".eye")?.addEventListener("click", (e) => {
+          e.stopPropagation();
+          toggleBranchHidden(t, refKey(r));
         });
         ul.appendChild(li);
       });
@@ -539,6 +645,26 @@ function buildRefColumn(refsHere: RefInfo[]): string {
   return html;
 }
 
+// ---- virtualized graph rendering ----
+interface GCtx {
+  tab: Tab;
+  placed: Placed[];
+  byId: Map<string, Placed>;
+  refsByHash: Map<string, RefInfo[]>;
+  graphW: number;
+}
+let gctx: GCtx | null = null;
+let paintQueued = false;
+
+function schedulePaint() {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    paintViewport();
+  });
+}
+
 function renderGraph(t: Tab) {
   const repo = t.repo;
   gRemoteTags = t.remoteTags ?? new Set();
@@ -549,8 +675,35 @@ function renderGraph(t: Tab) {
   const byId = new Map<string, Placed>();
   placed.forEach((p) => byId.set(p.node.id, p));
 
-  // lineage highlight: when a node is selected, find it + all its ancestors;
-  // everything else is dimmed so the related history stands out.
+  const refsByHash = new Map<string, RefInfo[]>();
+  for (const r of repo.refs) {
+    const arr = refsByHash.get(r.target) ?? [];
+    arr.push(r);
+    refsByHash.set(r.target, arr);
+  }
+
+  const graphW = laneX(maxLane) + PAD;
+  const totalH = placed.length * ROW_H;
+
+  const svg = $("graph-svg") as unknown as SVGSVGElement;
+  svg.setAttribute("width", String(graphW));
+  svg.setAttribute("height", String(totalH));
+  svg.style.left = `${REF_W}px`;
+  (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphW}px`;
+  $("rows").style.height = `${totalH}px`;
+
+  gctx = { tab: t, placed, byId, refsByHash, graphW };
+  $("empty").classList.add("hidden");
+  paintViewport();
+}
+
+// render only the rows/nodes/edges visible in the scroll viewport
+function paintViewport() {
+  if (!gctx) return;
+  const { tab: t, placed, byId, refsByHash, graphW } = gctx;
+  const repo = t.repo;
+
+  // lineage set for the selected node (+ ancestors)
   let related: Set<string> | null = null;
   if (t.selected && byId.has(t.selected)) {
     related = new Set<string>();
@@ -565,138 +718,79 @@ function renderGraph(t: Tab) {
   }
   const dimId = (id: string) => related !== null && !related.has(id);
 
-  const graphW = laneX(maxLane) + PAD;
-  const totalH = placed.length * ROW_H;
+  const scroll = $("scroll");
+  const top = scroll.scrollTop;
+  const vh = scroll.clientHeight || 600;
+  const BUF = 12;
+  const start = Math.max(0, Math.floor(top / ROW_H) - BUF);
+  const end = Math.min(placed.length, Math.ceil((top + vh) / ROW_H) + BUF);
 
-  const refsByHash = new Map<string, RefInfo[]>();
-  for (const r of repo.refs) {
-    const arr = refsByHash.get(r.target) ?? [];
-    arr.push(r);
-    refsByHash.set(r.target, arr);
-  }
-
-  // size/place the graph column + headers
-  const svg = $("graph-svg") as unknown as SVGSVGElement;
-  svg.setAttribute("width", String(graphW));
-  svg.setAttribute("height", String(totalH));
-  svg.style.left = `${REF_W}px`;
-  svg.innerHTML = "";
-  (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphW}px`;
-
-  // edges
+  // --- SVG: edges (only those intersecting the viewport) + visible nodes ---
+  const parts: string[] = [];
   for (const p of placed) {
-    const cx = laneX(p.lane);
-    const cy = rowY(p.row);
     for (const ph of p.node.parents) {
       const pp = byId.get(ph);
       if (!pp) continue;
-      const px = laneX(pp.lane);
-      const py = rowY(pp.row);
-      const path = svgEl("path");
+      const a = Math.min(p.row, pp.row);
+      const b = Math.max(p.row, pp.row);
+      if (b < start || a > end) continue; // segment off-screen
+      const cx = laneX(p.lane), cy = rowY(p.row);
+      const px = laneX(pp.lane), py = rowY(pp.row);
       const midY = (cy + py) / 2;
       const d =
         px === cx
           ? `M ${cx} ${cy} L ${px} ${py}`
           : `M ${cx} ${cy} C ${cx} ${midY}, ${px} ${midY}, ${px} ${py}`;
-      path.setAttribute("d", d);
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke", pp.color);
-      path.setAttribute("stroke-width", "2");
-      if (p.node.kind !== "commit") path.setAttribute("stroke-dasharray", "3 3");
-      if (dimId(p.node.id)) path.setAttribute("opacity", "0.13");
-      svg.appendChild(path);
+      const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
+      const op = dimId(p.node.id) ? ` opacity="0.13"` : "";
+      parts.push(`<path d="${d}" fill="none" stroke="${pp.color}" stroke-width="2"${dash}${op}/>`);
     }
   }
-
-  // nodes
-  for (const p of placed) {
-    const x = laneX(p.lane);
-    const y = rowY(p.row);
-    const op = dimId(p.node.id) ? "0.16" : "1";
-
+  for (let i = start; i < end; i++) {
+    const p = placed[i];
+    const x = laneX(p.lane), y = rowY(p.row);
+    const op = dimId(p.node.id) ? ` opacity="0.16"` : "";
     if (p.node.kind === "stash") {
       const sz = 11;
-      const rect = svgEl("rect");
-      rect.setAttribute("x", String(x - sz / 2));
-      rect.setAttribute("y", String(y - sz / 2));
-      rect.setAttribute("width", String(sz));
-      rect.setAttribute("height", String(sz));
-      rect.setAttribute("rx", "2");
-      rect.setAttribute("fill", "#1e1e2a"); // hollow, not solid like a commit
-      rect.setAttribute("stroke", STASH_COLOR);
-      rect.setAttribute("stroke-width", "1.5");
-      rect.setAttribute("stroke-dasharray", "2 2");
-      rect.setAttribute("opacity", op);
-      svg.appendChild(rect);
+      parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="#1e1e2a" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
     } else if (p.node.kind === "wip") {
-      const c = svgEl("circle");
-      c.setAttribute("cx", String(x));
-      c.setAttribute("cy", String(y));
-      c.setAttribute("r", String(NODE_R));
-      c.setAttribute("fill", "#1e1e2a");
-      c.setAttribute("stroke", WIP_COLOR);
-      c.setAttribute("stroke-width", "2");
-      c.setAttribute("stroke-dasharray", "2 2");
-      c.setAttribute("opacity", op);
-      svg.appendChild(c);
+      parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="2" stroke-dasharray="2 2"${op}/>`);
     } else {
-      // commit → per-author avatar; HEAD gets a highlight ring
       const c = p.node.commit!;
-      const isHead = c.hash === repo.head;
       const half = AVATAR / 2;
-
-      if (isHead) {
-        const ring = svgEl("rect");
-        ring.setAttribute("x", String(x - half - 2));
-        ring.setAttribute("y", String(y - half - 2));
-        ring.setAttribute("width", String(AVATAR + 4));
-        ring.setAttribute("height", String(AVATAR + 4));
-        ring.setAttribute("rx", "6");
-        ring.setAttribute("fill", "none");
-        ring.setAttribute("stroke", repo.head_branch ? "#ffffff" : "#ff8f8f");
-        ring.setAttribute("stroke-width", "2");
-        ring.setAttribute("opacity", op);
-        svg.appendChild(ring);
+      if (c.hash === repo.head) {
+        const stroke = repo.head_branch ? "#ffffff" : "#ff8f8f";
+        parts.push(`<rect x="${x - half - 2}" y="${y - half - 2}" width="${AVATAR + 4}" height="${AVATAR + 4}" rx="6" fill="none" stroke="${stroke}" stroke-width="2"${op}/>`);
       }
-
-      const img = svgEl("image");
-      const key = c.email || c.author;
-      img.setAttribute("href", avatarUrl(key));
-      img.setAttribute("x", String(x - half));
-      img.setAttribute("y", String(y - half));
-      img.setAttribute("width", String(AVATAR));
-      img.setAttribute("height", String(AVATAR));
-      img.setAttribute("opacity", op);
-      const title = svgEl("title");
-      title.textContent = `${c.author} <${c.email}>`;
-      img.appendChild(title);
-      svg.appendChild(img);
+      parts.push(`<image href="${avatarUrl(c.email || c.author)}" x="${x - half}" y="${y - half}" width="${AVATAR}" height="${AVATAR}"${op}><title>${escapeHtml(`${c.author} <${c.email}>`)}</title></image>`);
     }
   }
+  ($("graph-svg") as unknown as SVGSVGElement).innerHTML = parts.join("");
 
-  // 3-column rows: [ Branch/Tag | Graph spacer | Commit message ]
+  // --- rows (only visible, absolutely positioned) ---
   const rows = $("rows");
   rows.innerHTML = "";
-  for (const p of placed) {
+  for (let i = start; i < end; i++) {
+    const p = placed[i];
     const n = p.node;
     const row = document.createElement("div");
     row.className = "crow";
     row.dataset.id = n.id;
+    row.style.top = `${p.row * ROW_H}px`;
     if (n.id === t.selected) row.classList.add("selected");
     if (dimId(n.id)) row.classList.add("dim");
 
     let refHtml = "";
     let msgHtml = "";
-
     if (n.kind === "wip") {
       const w = n.wip!;
-      const parts: string[] = [];
-      if (w.staged) parts.push(`${w.staged} staged`);
-      if (w.unstaged) parts.push(`${w.unstaged} unstaged`);
-      if (w.untracked) parts.push(`${w.untracked} untracked`);
+      const ps: string[] = [];
+      if (w.staged) ps.push(`${w.staged} staged`);
+      if (w.unstaged) ps.push(`${w.unstaged} unstaged`);
+      if (w.untracked) ps.push(`${w.untracked} untracked`);
       msgHtml =
         `<span class="badge wip">WIP</span>` +
-        `<span class="summary">Uncommitted changes — ${parts.join(", ")}</span>`;
+        `<span class="summary">Uncommitted changes — ${ps.join(", ")}</span>`;
     } else if (n.kind === "stash") {
       const s = n.stash!;
       msgHtml =
@@ -706,13 +800,11 @@ function renderGraph(t: Tab) {
         `<span class="hash">${s.hash.slice(0, 8)}</span>`;
     } else {
       const c = n.commit!;
-      const isHead = c.hash === repo.head;
       const here = refsByHash.get(c.hash) ?? [];
       refHtml =
-        (isHead && !repo.head_branch
+        (c.hash === repo.head && !repo.head_branch
           ? `<span class="badge detached">HEAD · detached</span>`
           : "") + buildRefColumn(here);
-      // faint "which branch" hint on the selected commit
       if (
         t.hint &&
         t.hint.hash === c.hash &&
@@ -726,70 +818,69 @@ function renderGraph(t: Tab) {
         `<span class="date">${fmtDate(c.time)}</span>` +
         `<span class="hash">${c.hash.slice(0, 8)}</span>`;
     }
-
     row.innerHTML =
       `<div class="col-ref">${refHtml}</div>` +
       `<div class="col-graph" style="width:${graphW}px"></div>` +
       `<div class="col-msg">${msgHtml}</div>`;
-
-    row.addEventListener("click", () => selectNode(n));
-    if (n.kind === "commit") {
-      const hash = n.commit!.hash;
-      const refsHere = refsByHash.get(hash) ?? [];
-      row.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        // right-click on a branch/tag badge -> that ref's menu (has Merge etc.)
-        const badge = (e.target as HTMLElement).closest(
-          ".badge[data-refname]"
-        ) as HTMLElement | null;
-        if (badge) {
-          const ref = repo.refs.find(
-            (x) =>
-              x.name === badge.dataset.refname &&
-              x.kind === badge.dataset.refkind
-          );
-          if (ref) {
-            showMenu(e.clientX, e.clientY, branchMenu(ref, repo));
-            return;
-          }
-        }
-        selectNode(n);
-        showMenu(e.clientX, e.clientY, commitMenu(hash, refsHere, repo));
-      });
-      // "+N" pill -> dropdown of all refs at this commit (checkout any)
-      const plus = row.querySelector(".refplus");
-      if (plus) {
-        plus.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const me = e as MouseEvent;
-          showMenu(
-            me.clientX,
-            me.clientY,
-            refsHere.map((r) => {
-              const isRemote = r.kind === "remote";
-              const target = isRemote
-                ? r.name.split("/").slice(1).join("/")
-                : r.name;
-              return {
-                label: `Checkout ${r.name}`,
-                action: () => doCheckout(target, isRemote ? r.name : undefined),
-              };
-            })
-          );
-        });
-      }
-    } else if (n.kind === "stash") {
-      const s = n.stash!;
-      row.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        selectNode(n);
-        showMenu(e.clientX, e.clientY, stashMenu(s, repo));
-      });
-    }
+    attachRowEvents(row, n, repo, refsByHash);
     rows.appendChild(row);
   }
+}
 
-  $("empty").classList.add("hidden");
+function attachRowEvents(
+  row: HTMLElement,
+  n: GNode,
+  repo: RepoData,
+  refsByHash: Map<string, RefInfo[]>
+) {
+  row.addEventListener("click", () => selectNode(n));
+  if (n.kind === "commit") {
+    const hash = n.commit!.hash;
+    const refsHere = refsByHash.get(hash) ?? [];
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const badge = (e.target as HTMLElement).closest(
+        ".badge[data-refname]"
+      ) as HTMLElement | null;
+      if (badge) {
+        const ref = repo.refs.find(
+          (x) => x.name === badge.dataset.refname && x.kind === badge.dataset.refkind
+        );
+        if (ref) {
+          showMenu(e.clientX, e.clientY, branchMenu(ref, repo));
+          return;
+        }
+      }
+      selectNode(n);
+      showMenu(e.clientX, e.clientY, commitMenu(hash, refsHere, repo));
+    });
+    const plus = row.querySelector(".refplus");
+    if (plus) {
+      plus.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const me = e as MouseEvent;
+        showMenu(
+          me.clientX,
+          me.clientY,
+          refsHere.map((r) => {
+            const isRemote = r.kind === "remote";
+            const target = isRemote ? r.name.split("/").slice(1).join("/") : r.name;
+            return {
+              label: `Checkout ${r.name}`,
+              action: () => doCheckout(target, isRemote ? r.name : undefined),
+            };
+          })
+        );
+      });
+    }
+  } else if (n.kind === "stash") {
+    const s = n.stash!;
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      selectNode(n);
+      showMenu(e.clientX, e.clientY, stashMenu(s, repo));
+    });
+  }
 }
 
 function findById(t: Tab, id: string): GNode | null {
@@ -835,7 +926,7 @@ function showBranchHint(t: Tab, hash: string) {
   const branch = branchForCommit(t, hash);
   if (!branch || t.selected !== hash) return;
   t.hint = { hash, branch };
-  if (cur() === t) renderGraph(t); // persists across auto-refresh re-renders
+  if (cur() === t) paintViewport(); // persists across auto-refresh re-renders
 }
 
 async function selectNode(n: GNode | null, scroll = false) {
@@ -844,20 +935,21 @@ async function selectNode(n: GNode | null, scroll = false) {
   t.selected = n.id;
   showDiffView(false); // return main area to the graph
 
-  document.querySelectorAll(".crow").forEach((el) => {
-    el.classList.toggle("selected", (el as HTMLElement).dataset.id === n.id);
-  });
+  // scroll the selected row into view (virtualized -> set scrollTop directly)
+  if (scroll && gctx && gctx.tab === t) {
+    const p = gctx.byId.get(n.id);
+    const scrollEl = $("scroll");
+    if (p) {
+      const target = p.row * ROW_H - scrollEl.clientHeight / 2;
+      scrollEl.scrollTop = Math.max(0, target);
+    }
+  }
   // clear previous "which branch" hint, then compute a fresh one
   t.hint = undefined;
-  renderGraph(t);
+  paintViewport();
   if (n.kind === "commit") showBranchHint(t, n.commit!.hash);
-  if (scroll) {
-    const el = document.querySelector(
-      `.crow[data-id="${cssEsc(n.id)}"]`
-    ) as HTMLElement | null;
-    el?.scrollIntoView({ block: "center" });
-  }
 
+  $("detail").classList.remove("collapsed"); // reopen panel on selection
   $("detail-empty").classList.add("hidden");
   $("commit-panel").classList.toggle("hidden", n.kind !== "wip");
   $("detail-body").classList.toggle("hidden", n.kind === "wip");
@@ -945,18 +1037,19 @@ async function loadRepo(path: string, silent = false) {
   setStatus("loading…");
   try {
     const repo = await invoke<RepoData>("open_repo", { path });
-    const nodes = buildNodes(repo);
     const tab: Tab = {
       repo,
       selected: repo.head || (repo.wip ? WIP_ID : null),
-      nodes,
+      nodes: buildNodes(repo),
       placed: [],
+      hidden: new Set(),
     };
     tabs.push(tab);
     active = tabs.length - 1;
     renderTabs();
     renderActive();
     saveSession();
+    saveRepoCache(path, repo);
     refreshRemoteTags(tab);
   } catch (e) {
     setStatus("");
@@ -976,35 +1069,85 @@ function saveSession() {
   } catch {}
 }
 
+// ---- repo cache (fast startup) ----
+const cacheKey = (path: string) => `jkt.cache:${path}`;
+function saveRepoCache(path: string, repo: RepoData) {
+  try {
+    localStorage.setItem(cacheKey(path), JSON.stringify(repo));
+  } catch {
+    // quota exceeded (very large repo) — drop the stale entry, skip caching
+    try {
+      localStorage.removeItem(cacheKey(path));
+    } catch {}
+  }
+}
+function loadRepoCache(path: string): RepoData | null {
+  try {
+    return JSON.parse(localStorage.getItem(cacheKey(path)) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
 async function restoreSession() {
   let data: { paths: string[]; active: number } | null = null;
   try {
     data = JSON.parse(localStorage.getItem(LS_SESSION) ?? "null");
   } catch {}
   if (!data || !data.paths?.length) return;
-  // open all repos in parallel (much faster than one-after-another)
+
+  // Build tabs instantly from cache where available; load uncached ones live.
+  const uncached: { path: string; idx: number }[] = [];
+  data.paths.forEach((p, idx) => {
+    const cached = loadRepoCache(p);
+    if (cached) {
+      tabs.push({
+        repo: cached,
+        selected: cached.head || (cached.wip ? WIP_ID : null),
+        nodes: buildNodes(cached),
+        placed: [],
+        hidden: new Set(),
+        stale: true, // refresh in background / on enter
+      });
+    } else {
+      tabs.push(null as unknown as Tab); // placeholder, filled below
+      uncached.push({ path: p, idx });
+    }
+  });
+
+  // load the repos with no cache (parallel)
   const loaded = await Promise.all(
-    data.paths.map((p) =>
-      invoke<RepoData>("open_repo", { path: p }).catch(() => null)
+    uncached.map((u) =>
+      invoke<RepoData>("open_repo", { path: u.path })
+        .then((repo) => ({ idx: u.idx, repo }))
+        .catch(() => ({ idx: u.idx, repo: null }))
     )
   );
-  for (const repo of loaded) {
-    if (!repo) continue; // skip repos that vanished
-    tabs.push({
-      repo,
-      selected: repo.head || (repo.wip ? WIP_ID : null),
-      nodes: buildNodes(repo),
-      placed: [],
-    });
+  for (const { idx, repo } of loaded) {
+    tabs[idx] = repo
+      ? {
+          repo,
+          selected: repo.head || (repo.wip ? WIP_ID : null),
+          nodes: buildNodes(repo),
+          placed: [],
+          hidden: new Set(),
+        }
+      : (null as unknown as Tab);
   }
+  // drop any failed placeholders
+  for (let i = tabs.length - 1; i >= 0; i--) if (!tabs[i]) tabs.splice(i, 1);
+
   if (!tabs.length) return;
   active = Math.min(Math.max(0, data.active ?? 0), tabs.length - 1);
   renderTabs();
   renderActive();
   saveSession();
-  // only the active tab needs its remote-tag status fetched up front
+
   const t = cur();
-  if (t) refreshRemoteTags(t);
+  if (t) {
+    refreshRemoteTags(t);
+    if (t.stale) reloadActive(); // refresh the visible tab in the background
+  }
 }
 
 function getCollapsed(): Set<string> {
@@ -1387,13 +1530,21 @@ async function showImageDiff(
   file: string,
   hash: string | null
 ) {
+  await showImageRevs(title, path, file, hash ? `${hash}^` : "HEAD", hash ?? "");
+}
+
+async function showImageRevs(
+  title: string,
+  path: string,
+  file: string,
+  oldRev: string,
+  newRev: string
+) {
   $("diffview-title").textContent = title;
   $("diff-minimap").innerHTML = "";
   const body = $("diffview-body");
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
   showDiffView(true);
-  const oldRev = hash ? `${hash}^` : "HEAD";
-  const newRev = hash ? hash : "";
   const [oldUrl, newUrl] = await Promise.all([
     invoke<string>("blob_data_url", { path, rev: oldRev, file }).catch(() => ""),
     invoke<string>("blob_data_url", { path, rev: newRev, file }).catch(() => ""),
@@ -1418,14 +1569,54 @@ async function showImageDiff(
   body.innerHTML = `<div class="imgdiff">${html}</div>`;
 }
 
+// show files that differ between a commit and the working tree, as a list;
+// click a file for its own diff (split per file, not one giant blob)
 async function compareCommitToWorking(path: string, hash: string) {
-  $("diffview-title").textContent = `${hash.slice(0, 8)} ↔ working directory`;
-  $("diffview-body").innerHTML =
-    "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  const sha = hash.slice(0, 8);
+  $("detail").classList.remove("collapsed");
+  $("detail-empty").classList.add("hidden");
+  $("commit-panel").classList.add("hidden");
+  $("conflict-panel").classList.add("hidden");
+  $("detail-body").classList.remove("hidden");
+  showDiffView(false);
+  $("d-summary").textContent = `Compare ${sha} ↔ working directory`;
+  $("d-meta").innerHTML = `<div>files that differ between this commit and your working tree</div>`;
+  const ul = $("d-files");
+  ul.innerHTML = "<li class='muted'>loading…</li>";
+  try {
+    const files = await invoke<FileChange[]>("compare_files", { path, hash });
+    ul.innerHTML = "";
+    if (!files.length) ul.innerHTML = "<li class='muted'>(no differences)</li>";
+    files.forEach((f) => {
+      const li = document.createElement("li");
+      const s = f.status.charAt(0).toUpperCase();
+      const cls = s === "?" ? "Q" : s;
+      li.innerHTML = `<span class="fstatus ${cls}">${s}</span><span>${escapeHtml(f.path)}</span>`;
+      li.addEventListener("click", () => {
+        ul.querySelectorAll("li").forEach((x) => x.classList.remove("selected"));
+        li.classList.add("selected");
+        openCompareDiff(path, hash, f.path);
+      });
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    ul.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
+  }
+}
+
+// one file's diff between a commit and the working tree
+async function openCompareDiff(path: string, hash: string, file: string) {
+  const title = `${file} — ${hash.slice(0, 8)} ↔ working`;
+  if (isImage(file)) {
+    await showImageRevs(title, path, file, hash, ""); // old=commit, new=working
+    return;
+  }
+  $("diffview-title").textContent = title;
+  $("diffview-body").innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
   showDiffView(true);
   try {
-    const diff = await invoke<string>("diff_commit_worktree", { path, hash });
-    showDiffText(`${hash.slice(0, 8)} ↔ working directory`, diff);
+    const diff = await invoke<string>("diff_against_working", { path, hash, file });
+    showDiffText(title, diff);
   } catch (e) {
     $("diffview-body").innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
   }
@@ -1533,9 +1724,10 @@ async function reloadGraphOnly() {
   try {
     const repo = await invoke<RepoData>("open_repo", { path: t.repo.path });
     t.repo = repo;
-    t.nodes = buildNodes(repo);
+    t.nodes = buildNodes(repo, t.hidden);
     renderSidebar(t);
     renderGraph(t);
+    saveRepoCache(t.repo.path, repo);
     t.fingerprint = await invoke<string>("repo_fingerprint", {
       path: t.repo.path,
     }).catch(() => t.fingerprint);
@@ -1616,10 +1808,12 @@ async function reloadActive(statusMsg?: string) {
   try {
     const repo = await invoke<RepoData>("open_repo", { path: t.repo.path });
     t.repo = repo;
-    t.nodes = buildNodes(repo);
+    t.stale = false;
+    t.nodes = buildNodes(repo, t.hidden);
     if (t.selected && !t.nodes.find((n) => n.id === t.selected)) {
       t.selected = repo.head || (repo.wip ? WIP_ID : null);
     }
+    saveRepoCache(t.repo.path, repo);
     t.fingerprint = await invoke<string>("repo_fingerprint", {
       path: t.repo.path,
     }).catch(() => t.fingerprint);
@@ -2083,6 +2277,8 @@ const ICONS: Record<string, string> = {
   remote: `<path d="M4.7 12a2.3 2.3 0 0 1-.2-4.6 3.2 3.2 0 0 1 6.2-.7A2.4 2.4 0 0 1 11.3 12z"/>`,
   tag: `<path d="M2.6 7.6V3.1a.5.5 0 0 1 .5-.5h4.5l5.3 5.3a1 1 0 0 1 0 1.4l-3.1 3.1a1 1 0 0 1-1.4 0z"/><circle cx="5" cy="5" r=".7"/>`,
   stash: `<rect x="2.5" y="4" width="11" height="8" rx="1"/><path d="M2.5 8h3l1 1.4h3L13.5 8"/>`,
+  eye: `<path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>`,
+  eyeoff: `<path d="M2 2l12 12"/><path d="M6.7 6.7a2 2 0 0 0 2.6 2.6"/><path d="M9.8 3.6A6 6 0 0 1 14.5 8a12 12 0 0 1-1.4 1.9"/><path d="M3.9 3.9A11 11 0 0 0 1.5 8S4 12.5 8 12.5a6 6 0 0 0 2.3-.45"/>`,
 };
 function icon(kind: string): string {
   return (
@@ -2242,7 +2438,21 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  $("scroll").addEventListener("scroll", schedulePaint, { passive: true });
+  window.addEventListener("resize", schedulePaint);
+  $("detail-close").addEventListener("click", () =>
+    $("detail").classList.add("collapsed")
+  );
   $("sb-right").addEventListener("click", showAbout);
+  $("search").addEventListener("input", (e) =>
+    runSearch((e.target as HTMLInputElement).value)
+  );
+  $("search").addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape") {
+      ($("search") as HTMLInputElement).value = "";
+      closeSearch();
+    }
+  });
   // merge resolver
   $("mv-ours").addEventListener("click", () => resolveAll("ours"));
   $("mv-theirs").addEventListener("click", () => resolveAll("theirs"));
@@ -2263,7 +2473,10 @@ window.addEventListener("DOMContentLoaded", () => {
   setInterval(pollActive, 1500); // auto-refresh on file/repo changes
 });
 // close context menu on any outside click / escape / scroll
-window.addEventListener("click", closeMenu);
+window.addEventListener("click", (e) => {
+  closeMenu();
+  if (!(e.target as HTMLElement).closest(".search-box")) closeSearch();
+});
 window.addEventListener("scroll", closeMenu, true);
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeMenu();

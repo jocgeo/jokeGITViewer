@@ -968,6 +968,32 @@ fn diff_commit_worktree(path: String, hash: String) -> Result<String, String> {
     git(&path, &["diff", "-U100000", &hash])
 }
 
+// files that differ between a commit and the working tree
+#[tauri::command]
+fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
+    let raw = git(&path, &["diff", "--name-status", "-M", &hash])?;
+    let mut files = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let status = it.next().unwrap_or("").to_string();
+        let p = it.last().unwrap_or("").to_string();
+        if !p.is_empty() {
+            files.push(FileChange { status, path: p });
+        }
+    }
+    Ok(files)
+}
+
+// diff of one file between a commit and the working tree (full context)
+#[tauri::command]
+fn diff_against_working(path: String, hash: String, file: String) -> Result<String, String> {
+    git(&path, &["diff", "-U100000", &hash, "--", &file])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1016,7 +1042,9 @@ pub fn run() {
             push_tag,
             delete_tag,
             delete_remote_tag,
-            blob_data_url
+            blob_data_url,
+            compare_files,
+            diff_against_working
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
