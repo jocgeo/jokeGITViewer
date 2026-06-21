@@ -830,20 +830,6 @@ fn create_tag(path: String, name: String, hash: String) -> Result<(), String> {
     git(&path, &["tag", &name, &hash]).map(|_| ())
 }
 
-// local branches that contain the given commit (for the "which branch" hint)
-#[tauri::command]
-fn branches_containing(path: String, hash: String) -> Result<Vec<String>, String> {
-    let raw = git(
-        &path,
-        &["branch", "--contains", &hash, "--format=%(refname:short)"],
-    )?;
-    Ok(raw
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|s| !s.is_empty() && !s.starts_with('('))
-        .collect())
-}
-
 // names of tags that exist on origin (hits the network; may be empty offline)
 #[tauri::command]
 fn remote_tags(path: String) -> Result<Vec<String>, String> {
@@ -944,8 +930,7 @@ pub fn run() {
             remote_tags,
             push_tag,
             delete_tag,
-            delete_remote_tag,
-            branches_containing
+            delete_remote_tag
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
