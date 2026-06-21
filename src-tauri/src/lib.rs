@@ -65,6 +65,7 @@ pub struct RepoData {
     stashes: Vec<StashEntry>,
     wip: Option<WipStatus>,
     conflict: ConflictState,
+    describe: String, // `git describe` — nearest tag (repo "version")
 }
 
 // Unit + record separators used in git --pretty format.
@@ -353,6 +354,9 @@ fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
     let stashes = load_stashes(&path).unwrap_or_default();
     let wip = load_wip(&path, &head);
     let conflict = load_conflict(&path);
+    let describe = git(&path, &["describe", "--tags", "--always", "--dirty"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
     Ok(RepoData {
         path,
@@ -363,6 +367,7 @@ fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
         stashes,
         wip,
         conflict,
+        describe,
     })
 }
 

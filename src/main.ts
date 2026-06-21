@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 
 // ---- types mirrored from the Rust backend ----
 interface Commit {
@@ -49,6 +50,7 @@ interface RepoData {
   stashes: StashEntry[];
   wip: WipStatus | null;
   conflict: ConflictState;
+  describe: string;
 }
 
 // ---- unified graph node ----
@@ -239,9 +241,25 @@ function closeTab(i: number) {
 }
 
 // ---- render everything for the active tab ----
+let appVersion = "";
+function updateStatusBar(t: Tab | null) {
+  const right = appVersion ? `jokeGITViewer v${appVersion}` : "jokeGITViewer";
+  if (!t) {
+    $("sb-left").textContent = "";
+    $("sb-right").textContent = right;
+    return;
+  }
+  const r = t.repo;
+  const branch = r.head_branch || "detached";
+  $("sb-left").textContent =
+    `${basename(r.path)} · ${branch} · ${r.head.slice(0, 8)} · ${r.commits.length} commits`;
+  $("sb-right").textContent = (r.describe ? `${r.describe} · ` : "") + right;
+}
+
 function renderActive() {
   showDiffView(false);
   const t = cur();
+  updateStatusBar(t);
   if (!t) {
     $("repo-path").textContent = "No repo open";
     setStatus("");
@@ -2076,6 +2094,12 @@ window.addEventListener("DOMContentLoaded", () => {
   $("cf-abort").addEventListener("click", abortMerge);
   $("cf-finish").addEventListener("click", finishMerge);
   setupCollapsible();
+  getVersion()
+    .then((v) => {
+      appVersion = v;
+      updateStatusBar(cur());
+    })
+    .catch(() => {});
   renderTabs();
   restoreSession();
   setInterval(pollActive, 1500); // auto-refresh on file/repo changes
