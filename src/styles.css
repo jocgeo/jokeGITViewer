@@ -317,6 +317,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
+.crow.dim .col-msg, .crow.dim .col-ref { opacity: .4; } /* not in selected lineage */
 
 .col-ref {
   width: 280px;

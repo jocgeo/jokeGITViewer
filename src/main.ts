@@ -111,7 +111,31 @@ const svgEl = (name: string) =>
   document.createElementNS("http://www.w3.org/2000/svg", name);
 
 // ---- build unified node list (commits + stashes + WIP) ----
-function buildNodes(repo: RepoData): GNode[] {
+const refKey = (r: { kind: string; name: string }) => `${r.kind}:${r.name}`;
+
+function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
+  // when branches are hidden, keep only commits still reachable from a visible
+  // ref / HEAD / stash base / WIP parent
+  let commits = repo.commits;
+  if (hidden && hidden.size) {
+    const map = new Map(repo.commits.map((c) => [c.hash, c]));
+    const tips: string[] = [];
+    for (const r of repo.refs) if (!hidden.has(refKey(r))) tips.push(r.target);
+    if (repo.head) tips.push(repo.head);
+    for (const s of repo.stashes) if (s.parents[0]) tips.push(s.parents[0]);
+    if (repo.wip?.parent) tips.push(repo.wip.parent);
+    const seen = new Set<string>();
+    const stack = [...tips];
+    while (stack.length) {
+      const h = stack.pop()!;
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const c = map.get(h);
+      if (c) for (const p of c.parents) stack.push(p);
+    }
+    commits = repo.commits.filter((c) => seen.has(c.hash));
+  }
+
   const nodes: GNode[] = [];
   if (repo.wip) {
     nodes.push({
@@ -131,7 +155,7 @@ function buildNodes(repo: RepoData): GNode[] {
       stash: s,
     });
   }
-  for (const c of repo.commits) {
+  for (const c of commits) {
     nodes.push({
       id: c.hash,
       kind: "commit",
@@ -525,6 +549,22 @@ function renderGraph(t: Tab) {
   const byId = new Map<string, Placed>();
   placed.forEach((p) => byId.set(p.node.id, p));
 
+  // lineage highlight: when a node is selected, find it + all its ancestors;
+  // everything else is dimmed so the related history stands out.
+  let related: Set<string> | null = null;
+  if (t.selected && byId.has(t.selected)) {
+    related = new Set<string>();
+    const stack = [t.selected];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (related.has(id)) continue;
+      related.add(id);
+      const pp = byId.get(id);
+      if (pp) for (const par of pp.node.parents) if (byId.has(par)) stack.push(par);
+    }
+  }
+  const dimId = (id: string) => related !== null && !related.has(id);
+
   const graphW = laneX(maxLane) + PAD;
   const totalH = placed.length * ROW_H;
 
@@ -563,6 +603,7 @@ function renderGraph(t: Tab) {
       path.setAttribute("stroke", pp.color);
       path.setAttribute("stroke-width", "2");
       if (p.node.kind !== "commit") path.setAttribute("stroke-dasharray", "3 3");
+      if (dimId(p.node.id)) path.setAttribute("opacity", "0.13");
       svg.appendChild(path);
     }
   }
@@ -571,6 +612,7 @@ function renderGraph(t: Tab) {
   for (const p of placed) {
     const x = laneX(p.lane);
     const y = rowY(p.row);
+    const op = dimId(p.node.id) ? "0.16" : "1";
 
     if (p.node.kind === "stash") {
       const sz = 11;
@@ -584,6 +626,7 @@ function renderGraph(t: Tab) {
       rect.setAttribute("stroke", STASH_COLOR);
       rect.setAttribute("stroke-width", "1.5");
       rect.setAttribute("stroke-dasharray", "2 2");
+      rect.setAttribute("opacity", op);
       svg.appendChild(rect);
     } else if (p.node.kind === "wip") {
       const c = svgEl("circle");
@@ -594,6 +637,7 @@ function renderGraph(t: Tab) {
       c.setAttribute("stroke", WIP_COLOR);
       c.setAttribute("stroke-width", "2");
       c.setAttribute("stroke-dasharray", "2 2");
+      c.setAttribute("opacity", op);
       svg.appendChild(c);
     } else {
       // commit → per-author avatar; HEAD gets a highlight ring
@@ -611,6 +655,7 @@ function renderGraph(t: Tab) {
         ring.setAttribute("fill", "none");
         ring.setAttribute("stroke", repo.head_branch ? "#ffffff" : "#ff8f8f");
         ring.setAttribute("stroke-width", "2");
+        ring.setAttribute("opacity", op);
         svg.appendChild(ring);
       }
 
@@ -621,6 +666,7 @@ function renderGraph(t: Tab) {
       img.setAttribute("y", String(y - half));
       img.setAttribute("width", String(AVATAR));
       img.setAttribute("height", String(AVATAR));
+      img.setAttribute("opacity", op);
       const title = svgEl("title");
       title.textContent = `${c.author} <${c.email}>`;
       img.appendChild(title);
@@ -637,6 +683,7 @@ function renderGraph(t: Tab) {
     row.className = "crow";
     row.dataset.id = n.id;
     if (n.id === t.selected) row.classList.add("selected");
+    if (dimId(n.id)) row.classList.add("dim");
 
     let refHtml = "";
     let msgHtml = "";
