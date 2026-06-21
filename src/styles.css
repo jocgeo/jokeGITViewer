@@ -361,7 +361,14 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .badge.current { outline: 1px solid var(--accent); font-weight: 700; }
 .bcheck { color: #7ee787; font-weight: 700; margin-right: 2px; }
 .tagpush { margin-left: 3px; color: #e3b341; font-weight: 700; } /* local-only tag */
-.badge.ghost { opacity: .42; font-style: italic; } /* "which branch" hint */
+/* "which branch" hint — outlined faint label, readable on any row bg */
+.badge.ghost {
+  background: transparent;
+  border: 1px dashed var(--muted);
+  color: var(--muted);
+  font-style: italic;
+  opacity: .8;
+}
 .refplus {
   display: inline-flex;
   align-items: center;

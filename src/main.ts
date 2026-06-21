@@ -79,6 +79,7 @@ interface Tab {
   placed: Placed[];
   fingerprint?: string; // cheap repo-state signature for auto-refresh
   remoteTags?: Set<string>; // tag names known to exist on origin
+  hint?: { hash: string; branch: string }; // "which branch" ghost for selected commit
 }
 
 // ---- layout constants ----
@@ -618,10 +619,19 @@ function renderGraph(t: Tab) {
     } else {
       const c = n.commit!;
       const isHead = c.hash === repo.head;
+      const here = refsByHash.get(c.hash) ?? [];
       refHtml =
         (isHead && !repo.head_branch
           ? `<span class="badge detached">HEAD · detached</span>`
-          : "") + buildRefColumn(refsByHash.get(c.hash) ?? []);
+          : "") + buildRefColumn(here);
+      // faint "which branch" hint on the selected commit
+      if (
+        t.hint &&
+        t.hint.hash === c.hash &&
+        !here.some((r) => r.name === t.hint!.branch)
+      ) {
+        refHtml += `<span class="badge local ghost">${icon("local")}${escapeHtml(t.hint.branch)}</span>`;
+      }
       msgHtml =
         `<span class="summary">${escapeHtml(c.summary)}</span>` +
         `<span class="author">${escapeHtml(c.author)}</span>` +
@@ -706,26 +716,38 @@ function clearDetail() {
   $("conflict-panel").classList.add("hidden");
 }
 
-// faintly show which branch the clicked commit belongs to, on its ref row
-async function showBranchHint(t: Tab, hash: string) {
-  let list: string[];
-  try {
-    list = await invoke<string[]>("branches_containing", { path: t.repo.path, hash });
-  } catch {
-    return;
-  }
-  if (!list.length || t.selected !== hash) return;
-  const pick = list.includes(t.repo.head_branch) ? t.repo.head_branch : list[0];
-  const rowRef = document.querySelector(
-    `.crow[data-id="${cssEsc(hash)}"] .col-ref`
-  ) as HTMLElement | null;
-  if (!rowRef) return;
-  // skip if a real badge for this branch is already shown on the row
-  if (rowRef.querySelector(`.badge[data-refname="${cssEsc(pick)}"]`)) return;
-  const span = document.createElement("span");
-  span.className = "badge local ghost";
-  span.innerHTML = `${icon("local")}${escapeHtml(pick)}`;
-  rowRef.appendChild(span);
+// which local branch contains `hash`, computed from loaded commits (prefer current)
+function branchForCommit(t: Tab, hash: string): string | null {
+  const repo = t.repo;
+  const byHash = new Map(repo.commits.map((c) => [c.hash, c]));
+  const reaches = (tip: string): boolean => {
+    const seen = new Set<string>();
+    const stack = [tip];
+    while (stack.length) {
+      const h = stack.pop()!;
+      if (h === hash) return true;
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const c = byHash.get(h);
+      if (c) for (const p of c.parents) stack.push(p);
+    }
+    return false;
+  };
+  const locals = repo.refs.filter((r) => r.kind === "local");
+  const ordered = [
+    ...locals.filter((r) => r.name === repo.head_branch),
+    ...locals.filter((r) => r.name !== repo.head_branch),
+  ];
+  for (const r of ordered) if (reaches(r.target)) return r.name;
+  return null;
+}
+
+// faintly show which branch the selected commit belongs to, on its ref row
+function showBranchHint(t: Tab, hash: string) {
+  const branch = branchForCommit(t, hash);
+  if (!branch || t.selected !== hash) return;
+  t.hint = { hash, branch };
+  if (cur() === t) renderGraph(t); // persists across auto-refresh re-renders
 }
 
 async function selectNode(n: GNode | null, scroll = false) {
@@ -737,8 +759,9 @@ async function selectNode(n: GNode | null, scroll = false) {
   document.querySelectorAll(".crow").forEach((el) => {
     el.classList.toggle("selected", (el as HTMLElement).dataset.id === n.id);
   });
-  // clear any previous "which branch" hint
-  document.querySelectorAll(".col-ref .ghost").forEach((e) => e.remove());
+  // clear previous "which branch" hint, then compute a fresh one
+  t.hint = undefined;
+  renderGraph(t);
   if (n.kind === "commit") showBranchHint(t, n.commit!.hash);
   if (scroll) {
     const el = document.querySelector(
