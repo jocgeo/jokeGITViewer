@@ -305,7 +305,7 @@ fn load_stashes(repo: &str) -> Result<Vec<StashEntry>, String> {
 }
 
 fn load_wip(repo: &str, head: &str) -> Option<WipStatus> {
-    let raw = git(repo, &["status", "--porcelain"]).ok()?;
+    let raw = git(repo, &["status", "--porcelain", "--untracked-files=all"]).ok()?;
     let (mut staged, mut unstaged, mut untracked) = (0u32, 0u32, 0u32);
     for line in raw.lines() {
         if line.len() < 2 {
@@ -497,7 +497,7 @@ pub struct WipFiles {
 // (worktree column + untracked). A file can appear in both (e.g. "MM").
 #[tauri::command]
 fn wip_status(path: String) -> Result<WipFiles, String> {
-    let raw = git(&path, &["status", "--porcelain"])?;
+    let raw = git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
     for line in raw.lines() {
@@ -576,7 +576,7 @@ fn commit(path: String, message: String, amend: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
-    let raw = git(&path, &["status", "--porcelain"])?;
+    let raw = git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
     let mut files = Vec::new();
     for line in raw.lines() {
         if line.len() < 3 {
@@ -607,8 +607,11 @@ fn wip_diff(path: String, file: String) -> Result<String, String> {
     } else {
         // untracked: synthesize a diff where every line is an addition so the
         // UI renders it with line numbers + green highlighting
-        let content = std::fs::read_to_string(format!("{path}/{file}"))
-            .map_err(|e| e.to_string())?;
+        let full = format!("{path}/{file}");
+        if Path::new(&full).is_dir() {
+            return Ok(format!("(untracked directory: {file})"));
+        }
+        let content = std::fs::read_to_string(&full).map_err(|e| e.to_string())?;
         let n = content.lines().count().max(1);
         let mut out = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{n} @@\n");
         for line in content.lines() {
@@ -629,7 +632,7 @@ fn wip_diff(path: String, file: String) -> Result<String, String> {
 //     so it reflects the latest fetched state (ff-only never loses local work).
 #[tauri::command]
 fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bool, String> {
-    let dirty = !git(&path, &["status", "--porcelain"])?.trim().is_empty();
+    let dirty = !git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty();
     let mut stashed = false;
     if dirty {
         git(&path, &["stash", "--include-untracked"])?;
@@ -664,7 +667,7 @@ fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bo
 #[tauri::command]
 fn repo_fingerprint(path: String) -> Result<String, String> {
     let head = git(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
-    let status = git(&path, &["status", "--porcelain"]).unwrap_or_default();
+    let status = git(&path, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default();
     let refs = git(
         &path,
         &[
@@ -715,7 +718,7 @@ fn pull(path: String) -> Result<bool, String> {
 
 #[tauri::command]
 fn stash_push(path: String) -> Result<(), String> {
-    if git(&path, &["status", "--porcelain"])?.trim().is_empty() {
+    if git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty() {
         return Err("nothing to stash".to_string());
     }
     git(&path, &["stash", "--include-untracked"]).map(|_| ())
@@ -765,7 +768,7 @@ fn open_terminal(path: String) -> Result<(), String> {
 
 // stash the working tree if dirty (used before ops that need a clean tree)
 fn stash_if_dirty(path: &str) -> Result<bool, String> {
-    let dirty = !git(path, &["status", "--porcelain"])?.trim().is_empty();
+    let dirty = !git(path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty();
     if dirty {
         git(path, &["stash", "--include-untracked"])?;
     }
