@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "jokeGITViewer",
-  "version": "0.1.0",
-  "identifier": "com.bavertis.jokegitviewer",
+  "version": "0.1.1",
+  "identifier": "com.jokegitviewer.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
