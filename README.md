@@ -1,6 +1,6 @@
 # jokeGITViewer
 
-A fast, lightweight Git GUI for Windows Linux an Mac — a slimmed-down, open take on visual Git
+A fast, lightweight Git GUI for Windows, Linux and macOS — a slimmed-down, open take on visual Git
 clients like GitKraken. View your whole history at a glance, manage branches and
 stashes, stage and commit, all from one window.
 

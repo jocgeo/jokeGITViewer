@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 // ---- types mirrored from the Rust backend ----
 interface Commit {
@@ -242,6 +243,45 @@ function closeTab(i: number) {
 }
 
 // ---- render everything for the active tab ----
+const ABOUT_ICON =
+  `<svg width="56" height="56" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">` +
+  `<circle cx="470" cy="440" r="250" fill="none" stroke="#6db3ff" stroke-width="58"/>` +
+  `<path d="M648 618 L 820 790" stroke="#6db3ff" stroke-width="76" stroke-linecap="round"/>` +
+  `<path d="M388 330 V550" stroke="#7ee787" stroke-width="30" stroke-linecap="round"/>` +
+  `<path d="M388 440 C 388 365, 560 388, 560 330" stroke="#7ee787" stroke-width="30" fill="none" stroke-linecap="round"/>` +
+  `<circle cx="388" cy="330" r="44" fill="#7ee787"/><circle cx="388" cy="550" r="44" fill="#7ee787"/>` +
+  `<circle cx="560" cy="330" r="44" fill="#ffcf8f"/></svg>`;
+
+function showAbout() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML =
+    `<div class="modal about">` +
+    `<div class="about-head">${ABOUT_ICON}<div><div class="about-title">jokeGITViewer</div>` +
+    `<div class="muted">v${appVersion || "?"}</div></div></div>` +
+    `<p class="about-desc">A fast, lightweight Git GUI for Windows, Linux &amp; macOS — visual commit graph, branches, stashes, staging &amp; commits, all in one window.</p>` +
+    `<div class="about-meta">` +
+    `<div>Built with Tauri 2 · Rust · TypeScript</div>` +
+    `<div>Uses the local <code>git</code> CLI</div>` +
+    `<div>License: MIT © jocgeo</div>` +
+    `</div>` +
+    `<div class="about-links">` +
+    `<button data-url="https://github.com/jocgeo/jokeGITViewer">GitHub</button>` +
+    `<button data-url="https://github.com/jocgeo/jokeGITViewer/releases">Releases</button>` +
+    `</div>` +
+    `<div class="modal-btns"><button class="modal-ok">Close</button></div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelectorAll<HTMLElement>(".about-links button").forEach((b) =>
+    b.addEventListener("click", () => openUrl(b.dataset.url!).catch(() => {}))
+  );
+  const close = () => overlay.remove();
+  overlay.querySelector(".modal-ok")?.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+}
+
 let appVersion = "";
 function updateStatusBar(t: Tab | null) {
   const right = appVersion ? `jokeGITViewer v${appVersion}` : "jokeGITViewer";
@@ -255,6 +295,7 @@ function updateStatusBar(t: Tab | null) {
   $("sb-left").textContent =
     `${basename(r.path)} · ${branch} · ${r.head.slice(0, 8)} · ${r.commits.length} commits`;
   $("sb-right").textContent = (r.describe ? `${r.describe} · ` : "") + right;
+  $("sb-right").title = "About jokeGITViewer";
 }
 
 function renderActive() {
@@ -2154,6 +2195,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  $("sb-right").addEventListener("click", showAbout);
   // merge resolver
   $("mv-ours").addEventListener("click", () => resolveAll("ours"));
   $("mv-theirs").addEventListener("click", () => resolveAll("theirs"));

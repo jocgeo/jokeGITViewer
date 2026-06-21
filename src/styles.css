@@ -180,7 +180,19 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-size: 11px;
 }
 #sb-left, #sb-right { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#sb-right { font-variant-numeric: tabular-nums; }
+#sb-right { font-variant-numeric: tabular-nums; cursor: pointer; }
+#sb-right:hover { color: var(--fg); }
+
+/* About modal */
+.modal.about { min-width: 380px; max-width: 460px; }
+.about-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.about-title { font-size: 18px; font-weight: 700; }
+.about-desc { font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+.about-meta { font-size: 12px; color: var(--muted); line-height: 1.7; margin-bottom: 14px; }
+.about-meta code { font-family: Consolas, monospace; color: var(--fg); }
+.about-links { display: flex; gap: 8px; margin-bottom: 14px; }
+.about-links button { flex: 1 1 0; }
+.about-foot { font-style: italic; margin: 0 0 14px; }
 
 #sidebar {
   flex: 0 0 220px;
