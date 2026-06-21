@@ -555,6 +555,38 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .dl.hunk { background: rgba(56, 139, 253, 0.12); }
 .dl.hunk .dc, .dl.meta .dc { color: var(--muted); }
 .dl.ctx .dc { color: var(--fg); }
+
+/* image change preview */
+.imgdiff { display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
+.imgpane { flex: 1 1 320px; min-width: 280px; }
+.imglabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.imglabel.add { color: #7ee787; }
+.imglabel.del { color: #f85149; }
+.imgwrap {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  /* checkerboard so transparent images are visible */
+  background-color: #2a2a36;
+  background-image:
+    linear-gradient(45deg, #20202a 25%, transparent 25%),
+    linear-gradient(-45deg, #20202a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #20202a 75%),
+    linear-gradient(-45deg, transparent 75%, #20202a 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+.imgwrap img { max-width: 100%; max-height: 60vh; image-rendering: auto; }
 /* exact changed characters within a line */
 .dl.add .chg { background: rgba(63, 185, 80, 0.45); border-radius: 2px; }
 .dl.del .chg { background: rgba(248, 81, 73, 0.45); border-radius: 2px; }

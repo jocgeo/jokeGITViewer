@@ -127,6 +127,76 @@ fn git_no_editor(repo: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// like git(), but returns raw stdout bytes (for binary blobs)
+fn git_bytes(repo: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| format!("failed to run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(out.stdout)
+}
+
+fn mime_for(file: &str) -> &'static str {
+    let f = file.to_ascii_lowercase();
+    if f.ends_with(".png") {
+        "image/png"
+    } else if f.ends_with(".jpg") || f.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if f.ends_with(".gif") {
+        "image/gif"
+    } else if f.ends_with(".webp") {
+        "image/webp"
+    } else if f.ends_with(".bmp") {
+        "image/bmp"
+    } else if f.ends_with(".ico") {
+        "image/x-icon"
+    } else if f.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+// Return a file's contents as a data: URL for <img>.
+// rev = "" -> working-tree file; otherwise a git revspec (e.g. "<hash>", "<hash>^", "HEAD").
+// Empty string result means the blob doesn't exist at that rev (added/deleted).
+#[tauri::command]
+fn blob_data_url(path: String, rev: String, file: String) -> Result<String, String> {
+    let bytes = if rev.is_empty() {
+        std::fs::read(format!("{path}/{file}")).unwrap_or_default()
+    } else {
+        git_bytes(&path, &["show", &format!("{rev}:{file}")]).unwrap_or_default()
+    };
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("data:{};base64,{}", mime_for(&file), base64(&bytes)))
+}
+
 fn is_repo(path: &str) -> bool {
     git(path, &["rev-parse", "--is-inside-work-tree"])
         .map(|s| s.trim() == "true")
@@ -616,7 +686,14 @@ fn wip_diff(path: String, file: String) -> Result<String, String> {
         if Path::new(&full).is_dir() {
             return Ok(format!("(untracked directory: {file})"));
         }
-        let content = std::fs::read_to_string(&full).map_err(|e| e.to_string())?;
+        let raw = std::fs::read(&full).map_err(|e| e.to_string())?;
+        // binary (incl. images) -> don't try to render as text
+        let content = match String::from_utf8(raw) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(format!("(binary file — {} bytes)", e.into_bytes().len()));
+            }
+        };
         let n = content.lines().count().max(1);
         let mut out = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{n} @@\n");
         for line in content.lines() {
@@ -938,7 +1015,8 @@ pub fn run() {
             remote_tags,
             push_tag,
             delete_tag,
-            delete_remote_tag
+            delete_remote_tag,
+            blob_data_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

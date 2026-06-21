@@ -1263,12 +1263,20 @@ function showDiffText(title: string, diff: string) {
   buildMinimap();
 }
 
+function isImage(file: string): boolean {
+  return /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/i.test(file);
+}
+
 async function openDiff(
   title: string,
   path: string,
   file: string,
   hash: string | null
 ) {
+  if (isImage(file)) {
+    await showImageDiff(title, path, file, hash);
+    return;
+  }
   $("diffview-title").textContent = title;
   const body = $("diffview-body");
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
@@ -1282,6 +1290,44 @@ async function openDiff(
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
     $("diff-minimap").innerHTML = "";
   }
+}
+
+// show an image change as before/after previews
+async function showImageDiff(
+  title: string,
+  path: string,
+  file: string,
+  hash: string | null
+) {
+  $("diffview-title").textContent = title;
+  $("diff-minimap").innerHTML = "";
+  const body = $("diffview-body");
+  body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  showDiffView(true);
+  const oldRev = hash ? `${hash}^` : "HEAD";
+  const newRev = hash ? hash : "";
+  const [oldUrl, newUrl] = await Promise.all([
+    invoke<string>("blob_data_url", { path, rev: oldRev, file }).catch(() => ""),
+    invoke<string>("blob_data_url", { path, rev: newRev, file }).catch(() => ""),
+  ]);
+
+  const pane = (label: string, url: string, cls: string) =>
+    `<div class="imgpane">` +
+    `<div class="imglabel ${cls}">${label}</div>` +
+    `<div class="imgwrap"><img src="${url}" alt="${escapeHtml(label)}"/></div>` +
+    `</div>`;
+
+  let html = "";
+  if (oldUrl && newUrl) {
+    html = pane("Before", oldUrl, "del") + pane("After", newUrl, "add");
+  } else if (newUrl) {
+    html = pane("Added", newUrl, "add");
+  } else if (oldUrl) {
+    html = pane("Deleted", oldUrl, "del");
+  } else {
+    html = `<div class='dl ctx'><span class='dc'>(no image data)</span></div>`;
+  }
+  body.innerHTML = `<div class="imgdiff">${html}</div>`;
 }
 
 async function compareCommitToWorking(path: string, hash: string) {
