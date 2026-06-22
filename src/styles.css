@@ -113,7 +113,25 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   min-width: 58px;
   padding: 4px 8px;
   font-size: 11px;
+  position: relative;
 }
+/* spinner on the active toolbar button */
+.tbtn.loading { pointer-events: none; }
+.tbtn.loading .tbi { visibility: hidden; }
+.tbtn.loading::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  margin-left: -8px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 #open-btn {
   display: flex;
   align-items: center;
@@ -292,7 +310,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .reflist .ricon { flex: 0 0 auto; display: inline-flex; }
 
 /* simple line icons */
-.ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; flex: 0 0 auto; }
+.ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; flex: 0 0 auto; pointer-events: none; }
+/* let drag initiate on the draggable badge/li, not on inner icons/text */
+.col-ref .badge > *, .reflist li .ricon, .reflist li .dot, .reflist li .rname, .reflist li .here, .reflist li .dl { pointer-events: none; }
 .side-head .ic, .reflist .ricon .ic { color: var(--muted); }
 .badge .ic { width: 12px; height: 12px; margin-right: 3px; }
 .reflist .rname { overflow: hidden; text-overflow: ellipsis; }

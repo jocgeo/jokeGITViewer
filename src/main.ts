@@ -170,7 +170,24 @@ function runSearch(q: string) {
     });
   });
 }
+function searchBoxEl() {
+  return document.querySelector(".search-box") as HTMLElement | null;
+}
+function openSearch() {
+  searchBoxEl()?.classList.remove("hidden");
+  const i = $("search") as HTMLInputElement;
+  i.focus();
+  i.select();
+}
+function toggleSearch() {
+  const box = searchBoxEl();
+  if (box?.classList.contains("hidden")) openSearch();
+  else closeSearch();
+}
 function closeSearch() {
+  searchBoxEl()?.classList.add("hidden");
+  const i = $("search") as HTMLInputElement | null;
+  if (i) i.value = "";
   const box = $("search-results");
   box.classList.add("hidden");
   box.innerHTML = "";
@@ -1798,6 +1815,7 @@ async function doCommit() {
   const desc = ($("c-desc") as HTMLTextAreaElement).value.trim();
   const amend = ($("c-amend") as HTMLInputElement).checked;
   const message = desc ? `${summary}\n\n${desc}` : summary;
+  pushBusy();
   try {
     await invoke("commit", { path: t.repo.path, message, amend });
     ($("c-summary") as HTMLInputElement).value = "";
@@ -1806,6 +1824,8 @@ async function doCommit() {
     await reloadActive("Committed");
   } catch (e) {
     alert("Commit failed:\n" + String(e));
+  } finally {
+    popBusy();
   }
 }
 
@@ -1891,6 +1911,7 @@ function setToolbar(repo: RepoData | null) {
   set("stash-btn", conflict,
     conflict ? "Cannot stash during a conflict" : "Stash all changes including untracked\ngit stash --include-untracked");
   set("terminal-btn", false);
+  if (isBusy()) applyBusy(); // keep greyed while an action runs
 }
 
 // ---- reload / write operations ----
@@ -1921,6 +1942,7 @@ async function doCheckout(target: string, upstream?: string) {
   const t = cur();
   if (!t) return;
   setStatus(`checking out ${target}…`);
+  pushBusy();
   try {
     const stashed = await invoke<boolean>("checkout", {
       path: t.repo.path,
@@ -1935,6 +1957,8 @@ async function doCheckout(target: string, upstream?: string) {
   } catch (e) {
     setStatus("");
     alert("Checkout failed:\n" + String(e));
+  } finally {
+    popBusy();
   }
 }
 
@@ -1942,12 +1966,15 @@ async function doFetch() {
   const t = cur();
   if (!t) return;
   setStatus("fetching…");
+  pushBusy("fetch-btn");
   try {
     await invoke<string>("fetch", { path: t.repo.path });
     await reloadActive("Fetched");
   } catch (e) {
     setStatus("");
     alert("Fetch failed:\n" + String(e));
+  } finally {
+    popBusy();
   }
 }
 
@@ -1955,18 +1982,21 @@ async function doPull() {
   const t = cur();
   if (!t) return;
   setStatus("pulling…");
-  runAction(invoke("pull", { path: t.repo.path }), "Pulled");
+  runAction(invoke("pull", { path: t.repo.path }), "Pulled", "pull-btn");
 }
 async function doPush() {
   const t = cur();
   if (!t) return;
   setStatus("pushing…");
+  pushBusy("push-btn");
   try {
     const msg = await invoke<string>("push", { path: t.repo.path });
     await reloadActive(msg);
   } catch (e) {
     setStatus("");
     alert("Push failed:\n" + String(e));
+  } finally {
+    popBusy();
   }
 }
 async function doBranch() {
@@ -1976,13 +2006,14 @@ async function doBranch() {
   if (name)
     runAction(
       invoke("create_branch_checkout", { path: t.repo.path, name }),
-      `Created & switched to ${name}`
+      `Created & switched to ${name}`,
+      "branch-btn"
     );
 }
 async function doStashBtn() {
   const t = cur();
   if (!t) return;
-  runAction(invoke("stash_push", { path: t.repo.path }), "Stashed changes");
+  runAction(invoke("stash_push", { path: t.repo.path }), "Stashed changes", "stash-btn");
 }
 async function doTerminal() {
   const t = cur();
@@ -2090,14 +2121,48 @@ async function copyText(s: string) {
   }
 }
 
+// ---- busy state: grey toolbar + spinner while a git action runs ----
+let busyCount = 0;
+let loadingBtn: string | null = null;
+const TOOLBAR_BTNS = ["fetch-btn", "pull-btn", "push-btn", "branch-btn", "stash-btn", "terminal-btn"];
+const isBusy = () => busyCount > 0;
+function applyBusy() {
+  for (const id of TOOLBAR_BTNS) {
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (b) b.disabled = true;
+  }
+}
+function pushBusy(btnId?: string) {
+  busyCount++;
+  if (btnId && !loadingBtn) {
+    loadingBtn = btnId;
+    document.getElementById(btnId)?.classList.add("loading");
+  }
+  applyBusy();
+}
+function popBusy() {
+  busyCount = Math.max(0, busyCount - 1);
+  if (busyCount === 0) {
+    if (loadingBtn) {
+      document.getElementById(loadingBtn)?.classList.remove("loading");
+      loadingBtn = null;
+    }
+    const t = cur();
+    setToolbar(t ? t.repo : null); // restore proper enabled/disabled states
+  }
+}
+
 // run a mutating git action, then refresh the graph
-async function runAction(p: Promise<unknown>, okMsg: string) {
+async function runAction(p: Promise<unknown>, okMsg: string, btnId?: string) {
+  pushBusy(btnId);
   try {
     const stashed = await p;
     await reloadActive(stashed === true ? `${okMsg} (changes stashed)` : okMsg);
   } catch (e) {
     setStatus("");
     alert(`${okMsg} failed:\n${String(e)}`);
+  } finally {
+    popBusy();
   }
 }
 
@@ -2536,6 +2601,10 @@ window.addEventListener("DOMContentLoaded", () => {
     $("detail").classList.add("collapsed")
   );
   $("sb-right").addEventListener("click", showAbout);
+  $("search-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleSearch();
+  });
   $("search").addEventListener("input", (e) =>
     runSearch((e.target as HTMLInputElement).value)
   );
@@ -2575,7 +2644,13 @@ window.addEventListener("dragend", () => {
 // close context menu on any outside click / escape / scroll
 window.addEventListener("click", (e) => {
   closeMenu();
-  if (!(e.target as HTMLElement).closest(".search-box")) closeSearch();
+  if (!(e.target as HTMLElement).closest(".search-box, #search-btn")) closeSearch();
+});
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    openSearch();
+  }
 });
 window.addEventListener("scroll", closeMenu, true);
 window.addEventListener("keydown", (e) => {
