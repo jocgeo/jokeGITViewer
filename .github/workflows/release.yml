@@ -71,7 +71,21 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "jokeGITViewer ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install."
+          releaseBody: "See the assets below. Installers (.msi/.exe setup, .dmg, .deb) or run the standalone build (portable .exe / .AppImage) — no install needed."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # The installers above don't include the raw standalone exe. Attach the
+      # portable Windows build (runs without installing).
+      - name: Upload standalone Windows exe
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          src="src-tauri/target/release/jokeGITViewer.exe"
+          out="jokeGITViewer_${V}_x64-portable.exe"
+          cp "$src" "$out"
+          gh release upload "${GITHUB_REF_NAME}" "$out" --clobber
