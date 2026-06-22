@@ -85,7 +85,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="${GITHUB_REF_NAME#v}"
-          src="src-tauri/target/release/jokeGITViewer.exe"
+          # raw binary is named after the cargo package ("jkt"), pick it robustly
+          src="src-tauri/target/release/jkt.exe"
+          [ -f "$src" ] || src="$(find src-tauri/target/release -maxdepth 1 -name '*.exe' ! -name '*setup*' | head -1)"
+          echo "standalone exe: $src"
           out="jokeGITViewer_${V}_x64-portable.exe"
           cp "$src" "$out"
           gh release upload "${GITHUB_REF_NAME}" "$out" --clobber
