@@ -178,6 +178,28 @@ function closeSearch() {
 
 const refKey = (r: { kind: string; name: string }) => `${r.kind}:${r.name}`;
 
+// drag-drop: menu shown when a branch is dropped onto another
+function showBranchDropMenu(
+  x: number,
+  y: number,
+  source: string,
+  target: string,
+  path: string
+) {
+  showMenu(x, y, [
+    {
+      label: `Merge ${source} into ${target}`,
+      action: () =>
+        runAction(invoke("merge_into", { path, source, target }), `Merged ${source} into ${target}`),
+    },
+    {
+      label: `Rebase ${source} onto ${target}`,
+      action: () =>
+        runAction(invoke("rebase_branch_onto", { path, source, target }), `Rebased ${source} onto ${target}`),
+    },
+  ]);
+}
+
 function toggleBranchHidden(t: Tab, key: string) {
   if (!t.hidden) t.hidden = new Set();
   if (t.hidden.has(key)) t.hidden.delete(key);
@@ -518,6 +540,37 @@ function renderSidebar(t: Tab) {
           e.stopPropagation();
           toggleBranchHidden(t, refKey(r));
         });
+
+        // drag & drop between local branches -> merge / rebase
+        if (kind === "local") {
+          li.draggable = true;
+          li.addEventListener("dragstart", (e) => {
+            dragSource = r.name;
+            if (e.dataTransfer) {
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", r.name);
+            }
+            li.classList.add("dragging");
+          });
+          const over = (e: DragEvent) => {
+            if (dragSource && dragSource !== r.name) {
+              e.preventDefault();
+              if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+              li.classList.add("drop-target");
+            }
+          };
+          li.addEventListener("dragenter", over);
+          li.addEventListener("dragover", over);
+          li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
+          li.addEventListener("drop", (e) => {
+            e.preventDefault();
+            li.classList.remove("drop-target");
+            const source = dragSource;
+            const target = r.name;
+            if (!source || source === target) return;
+            showBranchDropMenu(e.clientX, e.clientY, source, target, repo.path);
+          });
+        }
         ul.appendChild(li);
       });
     if (!ul.children.length) {
@@ -584,6 +637,7 @@ function refUnits(refsHere: RefInfo[]): RefUnit[] {
 }
 
 let gRemoteTags = new Set<string>(); // tags on origin, for the active render
+let dragSource: string | null = null; // branch being dragged (drag & drop)
 
 function unitBadge(u: RefUnit): string {
   let icons =
@@ -834,6 +888,44 @@ function attachRowEvents(
   refsByHash: Map<string, RefInfo[]>
 ) {
   row.addEventListener("click", () => selectNode(n));
+
+  // drag & drop on the graph's branch badges -> merge / rebase
+  row.querySelectorAll<HTMLElement>(".col-ref .badge[data-refname]").forEach((b) => {
+    const name = b.dataset.refname!;
+    const isLocal = b.dataset.refkind === "local";
+    if (isLocal) {
+      b.draggable = true;
+      b.addEventListener("dragstart", (e) => {
+        e.stopPropagation();
+        dragSource = name;
+        const dt = (e as DragEvent).dataTransfer;
+        if (dt) {
+          dt.effectAllowed = "move";
+          dt.setData("text/plain", name);
+        }
+      });
+    }
+    const over = (e: Event) => {
+      if (isLocal && dragSource && dragSource !== name) {
+        e.preventDefault();
+        const dt = (e as DragEvent).dataTransfer;
+        if (dt) dt.dropEffect = "move";
+        b.classList.add("drop-target");
+      }
+    };
+    b.addEventListener("dragenter", over);
+    b.addEventListener("dragover", over);
+    b.addEventListener("dragleave", () => b.classList.remove("drop-target"));
+    b.addEventListener("drop", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      b.classList.remove("drop-target");
+      if (isLocal && dragSource && dragSource !== name) {
+        const me = e as DragEvent;
+        showBranchDropMenu(me.clientX, me.clientY, dragSource, name, repo.path);
+      }
+    });
+  });
   if (n.kind === "commit") {
     const hash = n.commit!.hash;
     const refsHere = refsByHash.get(hash) ?? [];
@@ -2472,6 +2564,14 @@ window.addEventListener("DOMContentLoaded", () => {
   restoreSession();
   setInterval(pollActive, 1500); // auto-refresh on file/repo changes
 });
+// clear drag state when any drag ends
+window.addEventListener("dragend", () => {
+  dragSource = null;
+  document
+    .querySelectorAll(".drop-target,.dragging")
+    .forEach((x) => x.classList.remove("drop-target", "dragging"));
+});
+
 // close context menu on any outside click / escape / scroll
 window.addEventListener("click", (e) => {
   closeMenu();

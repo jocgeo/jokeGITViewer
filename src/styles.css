@@ -314,6 +314,12 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .reflist li:hover .eye { opacity: .7; }
 .reflist .eye:hover { opacity: 1; color: var(--fg); }
 .reflist li.branch-hidden { opacity: .45; }
+.reflist li.dragging { opacity: .5; }
+.reflist li.drop-target {
+  background: var(--sel);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
 .reflist li.branch-hidden .eye { opacity: .7; } /* keep visible so it can be re-shown */
 /* when an eye is present, the "not local" arrow shouldn't also grab margin-left:auto */
 .reflist li .dl { margin-left: 6px; }
@@ -429,7 +435,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   margin-right: 6px;
   border: 1px solid var(--border);
   flex: 0 0 auto;
+  user-select: none;
 }
+.col-ref .badge[data-refkind="local"] { cursor: grab; }
+.badge.drop-target { outline: 1px dashed var(--accent); outline-offset: 1px; background: var(--sel); }
 .badge.local { background: #2a3b55; color: #9cc4ff; }
 .badge.remote { background: #3b2a4d; color: #d6a8ff; }
 .badge.tag { background: #4d3f2a; color: #ffcf8f; }

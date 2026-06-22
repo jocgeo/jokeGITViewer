@@ -185,7 +185,7 @@ fn base64(data: &[u8]) -> String {
 // rev = "" -> working-tree file; otherwise a git revspec (e.g. "<hash>", "<hash>^", "HEAD").
 // Empty string result means the blob doesn't exist at that rev (added/deleted).
 #[tauri::command]
-fn blob_data_url(path: String, rev: String, file: String) -> Result<String, String> {
+async fn blob_data_url(path: String, rev: String, file: String) -> Result<String, String> {
     let bytes = if rev.is_empty() {
         std::fs::read(format!("{path}/{file}")).unwrap_or_default()
     } else {
@@ -299,7 +299,9 @@ fn load_refs(repo: &str) -> Result<Vec<RefInfo>, String> {
 
 fn load_commits(repo: &str, limit: u32) -> Result<Vec<Commit>, String> {
     // hash US parents US author US email US time US summary RS
-    let fmt = format!("%H{US}%P{US}%an{US}%ae{US}%at{US}%s{RS}");
+    // %ct = committer date (updated by cherry-pick/rebase) so graph order matches
+    // when the commit actually landed, not the original author date (%at).
+    let fmt = format!("%H{US}%P{US}%an{US}%ae{US}%ct{US}%s{RS}");
     // NOTE: deliberately NOT `--all`. `--all` includes refs/stash, which pulls
     // each stash's hidden internal commits (the "index on ..." / "untracked
     // files on ..." / "WIP on ..." entries) into the graph as junk rows.
@@ -408,7 +410,7 @@ fn load_wip(repo: &str, head: &str) -> Option<WipStatus> {
 }
 
 #[tauri::command]
-fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
+async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
     if !is_repo(&path) {
         return Err(format!("not a git repository: {path}"));
     }
@@ -449,7 +451,7 @@ pub struct ConflictVersions {
 }
 
 #[tauri::command]
-fn conflict_versions(path: String, file: String) -> Result<ConflictVersions, String> {
+async fn conflict_versions(path: String, file: String) -> Result<ConflictVersions, String> {
     let ours = git(&path, &["show", &format!(":2:{file}")]).unwrap_or_default();
     let theirs = git(&path, &["show", &format!(":3:{file}")]).unwrap_or_default();
     let merged = std::fs::read_to_string(format!("{path}/{file}")).unwrap_or_default();
@@ -458,7 +460,7 @@ fn conflict_versions(path: String, file: String) -> Result<ConflictVersions, Str
 
 // take one whole side for a conflicted file, then mark resolved (git add)
 #[tauri::command]
-fn resolve_take(path: String, file: String, side: String) -> Result<(), String> {
+async fn resolve_take(path: String, file: String, side: String) -> Result<(), String> {
     let flag = match side.as_str() {
         "ours" => "--ours",
         "theirs" => "--theirs",
@@ -470,13 +472,13 @@ fn resolve_take(path: String, file: String, side: String) -> Result<(), String> 
 
 // write resolved content to the file, then mark resolved
 #[tauri::command]
-fn resolve_write(path: String, file: String, content: String) -> Result<(), String> {
+async fn resolve_write(path: String, file: String, content: String) -> Result<(), String> {
     std::fs::write(format!("{path}/{file}"), content).map_err(|e| e.to_string())?;
     git(&path, &["add", "--", &file]).map(|_| ())
 }
 
 #[tauri::command]
-fn merge_abort(path: String, kind: String) -> Result<(), String> {
+async fn merge_abort(path: String, kind: String) -> Result<(), String> {
     let cmd = match kind.as_str() {
         "rebase" => vec!["rebase", "--abort"],
         "cherry-pick" => vec!["cherry-pick", "--abort"],
@@ -488,7 +490,7 @@ fn merge_abort(path: String, kind: String) -> Result<(), String> {
 
 // finish the operation once all conflicts are resolved
 #[tauri::command]
-fn merge_continue(path: String, kind: String) -> Result<(), String> {
+async fn merge_continue(path: String, kind: String) -> Result<(), String> {
     let r = match kind.as_str() {
         "rebase" => git_no_editor(&path, &["rebase", "--continue"]),
         "cherry-pick" => git_no_editor(&path, &["cherry-pick", "--continue"]),
@@ -509,7 +511,7 @@ fn merge_continue(path: String, kind: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
+async fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
     // --first-parent so merge commits report their changes (a plain `show`
     // prints nothing for merges); also works for root and normal commits.
     let raw = git(
@@ -545,7 +547,7 @@ fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
 }
 
 #[tauri::command]
-fn commit_diff(path: String, hash: String, file: String) -> Result<String, String> {
+async fn commit_diff(path: String, hash: String, file: String) -> Result<String, String> {
     // -U100000 => effectively full-file context (whole file shown, not just hunks)
     git(
         &path,
@@ -571,7 +573,7 @@ pub struct WipFiles {
 // Split working-tree changes into staged (index column) and unstaged
 // (worktree column + untracked). A file can appear in both (e.g. "MM").
 #[tauri::command]
-fn wip_status(path: String) -> Result<WipFiles, String> {
+async fn wip_status(path: String) -> Result<WipFiles, String> {
     let raw = git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
@@ -609,12 +611,12 @@ fn wip_status(path: String) -> Result<WipFiles, String> {
 }
 
 #[tauri::command]
-fn stage_file(path: String, file: String) -> Result<(), String> {
+async fn stage_file(path: String, file: String) -> Result<(), String> {
     git(&path, &["add", "--", &file]).map(|_| ())
 }
 
 #[tauri::command]
-fn unstage_file(path: String, file: String) -> Result<(), String> {
+async fn unstage_file(path: String, file: String) -> Result<(), String> {
     // restore --staged needs HEAD; on an unborn branch (no commits) fall back
     // to removing the entry from the index.
     if git(&path, &["restore", "--staged", "--", &file]).is_ok() {
@@ -624,12 +626,12 @@ fn unstage_file(path: String, file: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn stage_all(path: String) -> Result<(), String> {
+async fn stage_all(path: String) -> Result<(), String> {
     git(&path, &["add", "-A"]).map(|_| ())
 }
 
 #[tauri::command]
-fn unstage_all(path: String) -> Result<(), String> {
+async fn unstage_all(path: String) -> Result<(), String> {
     if git(&path, &["reset", "-q"]).is_ok() {
         return Ok(());
     }
@@ -638,7 +640,7 @@ fn unstage_all(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn commit(path: String, message: String, amend: bool) -> Result<(), String> {
+async fn commit(path: String, message: String, amend: bool) -> Result<(), String> {
     if message.trim().is_empty() {
         return Err("empty commit message".to_string());
     }
@@ -650,7 +652,7 @@ fn commit(path: String, message: String, amend: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
+async fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
     let raw = git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
     let mut files = Vec::new();
     for line in raw.lines() {
@@ -672,7 +674,7 @@ fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
 }
 
 #[tauri::command]
-fn wip_diff(path: String, file: String) -> Result<String, String> {
+async fn wip_diff(path: String, file: String) -> Result<String, String> {
     // All uncommitted changes for this file vs HEAD (staged + unstaged).
     // Untracked files have no HEAD blob, so fall back to showing the file.
     let tracked = git(&path, &["ls-files", "--error-unmatch", "--", &file]).is_ok();
@@ -713,7 +715,7 @@ fn wip_diff(path: String, file: String) -> Result<String, String> {
 //   - local branch exists  -> check it out, then fast-forward to the remote tip
 //     so it reflects the latest fetched state (ff-only never loses local work).
 #[tauri::command]
-fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bool, String> {
+async fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bool, String> {
     let dirty = !git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty();
     let mut stashed = false;
     if dirty {
@@ -747,7 +749,7 @@ fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bo
 // moves, refs change, the working tree changes, or stashes change. The UI polls
 // this and only reloads the graph when it differs.
 #[tauri::command]
-fn repo_fingerprint(path: String) -> Result<String, String> {
+async fn repo_fingerprint(path: String) -> Result<String, String> {
     let head = git(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
     let status = git(&path, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default();
     let refs = git(
@@ -773,7 +775,7 @@ fn repo_fingerprint(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn fetch(path: String) -> Result<String, String> {
+async fn fetch(path: String) -> Result<String, String> {
     // --prune drops remote-tracking refs that were deleted upstream.
     git(&path, &["fetch", "--all", "--prune"])?;
     Ok("fetched".to_string())
@@ -781,7 +783,7 @@ fn fetch(path: String) -> Result<String, String> {
 
 // push the CURRENT branch to origin (sets upstream). Fails on detached HEAD.
 #[tauri::command]
-fn push(path: String) -> Result<String, String> {
+async fn push(path: String) -> Result<String, String> {
     let branch = git(&path, &["symbolic-ref", "--short", "HEAD"])
         .map_err(|_| "cannot push: detached HEAD".to_string())?;
     let branch = branch.trim();
@@ -793,13 +795,13 @@ fn push(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn pull(path: String) -> Result<bool, String> {
+async fn pull(path: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["pull"], s)
 }
 
 #[tauri::command]
-fn stash_push(path: String) -> Result<(), String> {
+async fn stash_push(path: String) -> Result<(), String> {
     if git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty() {
         return Err("nothing to stash".to_string());
     }
@@ -807,32 +809,32 @@ fn stash_push(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn stash_pop(path: String) -> Result<(), String> {
+async fn stash_pop(path: String) -> Result<(), String> {
     git(&path, &["stash", "pop"]).map(|_| ())
 }
 
 #[tauri::command]
-fn stash_apply(path: String, selector: String) -> Result<(), String> {
+async fn stash_apply(path: String, selector: String) -> Result<(), String> {
     git(&path, &["stash", "apply", &selector]).map(|_| ())
 }
 
 #[tauri::command]
-fn stash_pop_at(path: String, selector: String) -> Result<(), String> {
+async fn stash_pop_at(path: String, selector: String) -> Result<(), String> {
     git(&path, &["stash", "pop", &selector]).map(|_| ())
 }
 
 #[tauri::command]
-fn stash_drop(path: String, selector: String) -> Result<(), String> {
+async fn stash_drop(path: String, selector: String) -> Result<(), String> {
     git(&path, &["stash", "drop", &selector]).map(|_| ())
 }
 
 #[tauri::command]
-fn create_branch_checkout(path: String, name: String) -> Result<(), String> {
+async fn create_branch_checkout(path: String, name: String) -> Result<(), String> {
     git(&path, &["checkout", "-b", &name]).map(|_| ())
 }
 
 #[tauri::command]
-fn open_terminal(path: String) -> Result<(), String> {
+async fn open_terminal(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         // open a new cmd window at the repo directory
@@ -872,31 +874,47 @@ fn run_or_conflict(path: &str, args: &[&str], stashed: bool) -> Result<bool, Str
 }
 
 #[tauri::command]
-fn merge_ref(path: String, reference: String) -> Result<bool, String> {
+async fn merge_ref(path: String, reference: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["merge", "--no-edit", &reference], s)
 }
 
 #[tauri::command]
-fn rebase_onto(path: String, reference: String) -> Result<bool, String> {
+async fn rebase_onto(path: String, reference: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["rebase", &reference], s)
 }
 
+// drag-and-drop: merge `source` branch into `target` (checks out target first)
 #[tauri::command]
-fn cherry_pick(path: String, hash: String) -> Result<bool, String> {
+async fn merge_into(path: String, source: String, target: String) -> Result<bool, String> {
+    let s = stash_if_dirty(&path)?;
+    git(&path, &["checkout", &target])?;
+    run_or_conflict(&path, &["merge", "--no-edit", &source], s)
+}
+
+// drag-and-drop: rebase `source` branch onto `target` (checks out source first)
+#[tauri::command]
+async fn rebase_branch_onto(path: String, source: String, target: String) -> Result<bool, String> {
+    let s = stash_if_dirty(&path)?;
+    git(&path, &["checkout", &source])?;
+    run_or_conflict(&path, &["rebase", &target], s)
+}
+
+#[tauri::command]
+async fn cherry_pick(path: String, hash: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["cherry-pick", &hash], s)
 }
 
 #[tauri::command]
-fn revert_commit(path: String, hash: String) -> Result<bool, String> {
+async fn revert_commit(path: String, hash: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["revert", "--no-edit", &hash], s)
 }
 
 #[tauri::command]
-fn reset_to(path: String, hash: String, mode: String) -> Result<(), String> {
+async fn reset_to(path: String, hash: String, mode: String) -> Result<(), String> {
     let flag = match mode.as_str() {
         "soft" => "--soft",
         "hard" => "--hard",
@@ -906,18 +924,18 @@ fn reset_to(path: String, hash: String, mode: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn create_branch(path: String, name: String, start: String) -> Result<(), String> {
+async fn create_branch(path: String, name: String, start: String) -> Result<(), String> {
     git(&path, &["branch", &name, &start]).map(|_| ())
 }
 
 #[tauri::command]
-fn create_tag(path: String, name: String, hash: String) -> Result<(), String> {
+async fn create_tag(path: String, name: String, hash: String) -> Result<(), String> {
     git(&path, &["tag", &name, &hash]).map(|_| ())
 }
 
 // names of tags that exist on origin (hits the network; may be empty offline)
 #[tauri::command]
-fn remote_tags(path: String) -> Result<Vec<String>, String> {
+async fn remote_tags(path: String) -> Result<Vec<String>, String> {
     let raw = git(&path, &["ls-remote", "--tags", "origin"])?;
     let mut set = std::collections::BTreeSet::new();
     for line in raw.lines() {
@@ -932,23 +950,23 @@ fn remote_tags(path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn push_tag(path: String, name: String) -> Result<String, String> {
+async fn push_tag(path: String, name: String) -> Result<String, String> {
     git(&path, &["push", "origin", &name])?;
     Ok(format!("Pushed tag {name}"))
 }
 
 #[tauri::command]
-fn delete_tag(path: String, name: String) -> Result<(), String> {
+async fn delete_tag(path: String, name: String) -> Result<(), String> {
     git(&path, &["tag", "-d", &name]).map(|_| ())
 }
 
 #[tauri::command]
-fn delete_remote_tag(path: String, name: String) -> Result<(), String> {
+async fn delete_remote_tag(path: String, name: String) -> Result<(), String> {
     git(&path, &["push", "origin", "--delete", &format!("refs/tags/{name}")]).map(|_| ())
 }
 
 #[tauri::command]
-fn create_tag_annotated(
+async fn create_tag_annotated(
     path: String,
     name: String,
     message: String,
@@ -958,19 +976,19 @@ fn create_tag_annotated(
 }
 
 #[tauri::command]
-fn worktree_add(path: String, dir: String, hash: String) -> Result<(), String> {
+async fn worktree_add(path: String, dir: String, hash: String) -> Result<(), String> {
     git(&path, &["worktree", "add", &dir, &hash]).map(|_| ())
 }
 
 // Full multi-file diff of a commit vs the current working directory.
 #[tauri::command]
-fn diff_commit_worktree(path: String, hash: String) -> Result<String, String> {
+async fn diff_commit_worktree(path: String, hash: String) -> Result<String, String> {
     git(&path, &["diff", "-U100000", &hash])
 }
 
 // files that differ between a commit and the working tree
 #[tauri::command]
-fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
+async fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
     let raw = git(&path, &["diff", "--name-status", "-M", &hash])?;
     let mut files = Vec::new();
     for line in raw.lines() {
@@ -990,7 +1008,7 @@ fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, String> 
 
 // diff of one file between a commit and the working tree (full context)
 #[tauri::command]
-fn diff_against_working(path: String, hash: String, file: String) -> Result<String, String> {
+async fn diff_against_working(path: String, hash: String, file: String) -> Result<String, String> {
     git(&path, &["diff", "-U100000", &hash, "--", &file])
 }
 
@@ -1044,7 +1062,9 @@ pub fn run() {
             delete_remote_tag,
             blob_data_url,
             compare_files,
-            diff_against_working
+            diff_against_working,
+            merge_into,
+            rebase_branch_onto
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
