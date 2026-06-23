@@ -191,6 +191,43 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .modal-btns { display: flex; justify-content: flex-end; gap: 8px; }
 .modal-ok.danger { background: #5a2020; border-color: #8a3030; color: #ffb3ae; }
 
+/* error modal */
+.modal.error-modal { border-color: #6b2a2a; max-width: 480px; }
+.error-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+.error-bang {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #f85149;
+  color: #1a0e0e;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.error-msg {
+  margin: 0 0 14px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: #ffb3ae;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
 /* Tab strip */
 #tabstrip {
   display: flex;
@@ -229,6 +266,13 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .tab-close:hover { background: var(--border); color: var(--fg); }
 
 #body { display: flex; flex: 1 1 auto; min-height: 0; }
+.splitter {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 8;
+}
+.splitter:hover, .splitter.dragging { background: var(--accent); }
 
 #statusbar {
   flex: 0 0 auto;
@@ -333,7 +377,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .reflist li:hover .eye { opacity: .7; }
 .reflist .eye:hover { opacity: 1; color: var(--fg); }
-.reflist li.branch-hidden { opacity: .45; }
+.reflist li.branch-hidden { opacity: .3; }
 .reflist li.dragging { opacity: .5; }
 .reflist li.drop-target {
   background: var(--sel);
@@ -368,6 +412,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   display: flex;
   flex: 0 0 auto;
   height: 26px;
+  position: sticky;   /* stays on top while scrolling vertically */
+  top: 0;
+  z-index: 6;
   background: var(--bg2);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
@@ -383,8 +430,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #scroll {
   position: relative;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow: auto;   /* both axes: horizontal scroll when window is narrow */
 }
+#graph-content { position: relative; }
 #graph-svg {
   position: absolute;
   top: 0; left: 280px; /* overridden by JS to REF_W */
@@ -407,6 +455,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
 .crow.dim .col-msg, .crow.dim .col-ref { opacity: .4; } /* not in selected lineage */
+.crow.dim-mid .col-msg, .crow.dim-mid .col-ref { opacity: .75; } /* ancestor that led here */
 
 .col-ref {
   width: 280px;
@@ -726,6 +775,26 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
   color: var(--muted); margin: 14px 0 6px;
 }
+.d-files-head { display: flex; align-items: center; justify-content: space-between; }
+.d-files-btns { display: flex; gap: 6px; }
+.tree-dir { color: var(--muted); cursor: pointer; }
+.tchev { display: inline-block; width: 12px; font-size: 10px; color: var(--muted); }
+.fdir { font-size: 12px; }
+.filelist .fpath { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.changed-file .fpath { color: var(--fg); }
+.filelist li:not(.changed-file):not(.tree-dir) .fpath { color: var(--muted); }
+.numstat {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 6px;
+}
+.ns-add { color: #3fb950; }
+.ns-del { color: #f85149; }
+.ns-bin { color: var(--muted); }
 .filelist { list-style: none; margin: 0; padding: 0; }
 .filelist li {
   padding: 3px 6px; border-radius: 4px; cursor: pointer;

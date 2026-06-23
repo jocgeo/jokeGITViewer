@@ -837,15 +837,51 @@ async fn create_branch_checkout(path: String, name: String) -> Result<(), String
 async fn open_terminal(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // open a new cmd window at the repo directory
+        // open a new cmd window at the repo directory (cd /d needs backslashes)
+        let win_path = path.replace('/', "\\");
         Command::new("cmd")
-            .args(["/C", "start", "cmd", "/K", &format!("cd /d \"{path}\"")])
+            .args(["/C", "start", "cmd", "/K", &format!("cd /d \"{win_path}\"")])
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
     {
         let _ = path;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_in_explorer(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // explorer.exe returns non-zero even on success, so don't check status
+        let _ = Command::new("explorer").arg(&path).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(&path).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(&path).spawn();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_in_vscode(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "code", &path]);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("code").arg(&path).spawn().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -986,6 +1022,63 @@ async fn diff_commit_worktree(path: String, hash: String) -> Result<String, Stri
     git(&path, &["diff", "-U100000", &hash])
 }
 
+// full contents of a file at a commit (or the working tree if hash empty)
+#[tauri::command]
+async fn file_at_commit(path: String, hash: String, file: String) -> Result<String, String> {
+    if hash.is_empty() {
+        std::fs::read_to_string(format!("{path}/{file}")).map_err(|e| e.to_string())
+    } else {
+        git(&path, &["show", &format!("{hash}:{file}")])
+    }
+}
+
+// every file in the project at a commit (or the working tree if hash empty)
+#[tauri::command]
+async fn commit_tree(path: String, hash: String) -> Result<Vec<String>, String> {
+    let raw = if hash.is_empty() {
+        git(&path, &["ls-files"])?
+    } else {
+        git(&path, &["ls-tree", "-r", "--name-only", &hash])?
+    };
+    Ok(raw.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect())
+}
+
+#[derive(Serialize)]
+pub struct NumStat {
+    path: String,
+    added: i64,   // -1 for binary
+    deleted: i64, // -1 for binary
+}
+
+// added/deleted line counts per changed file for a commit (or WIP if hash empty)
+#[tauri::command]
+async fn commit_numstat(path: String, hash: String) -> Result<Vec<NumStat>, String> {
+    let raw = if hash.is_empty() {
+        git(&path, &["diff", "--numstat", "HEAD"])?
+    } else {
+        git(&path, &["show", "--numstat", "--format=", "--first-parent", "-M", &hash])?
+    };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let a = it.next().unwrap_or("");
+        let d = it.next().unwrap_or("");
+        let p = it.last().unwrap_or("");
+        if p.is_empty() {
+            continue;
+        }
+        out.push(NumStat {
+            path: p.rsplit(" => ").next().unwrap_or(p).trim_end_matches('}').to_string(),
+            added: a.parse().unwrap_or(-1),
+            deleted: d.parse().unwrap_or(-1),
+        });
+    }
+    Ok(out)
+}
+
 // files that differ between a commit and the working tree
 #[tauri::command]
 async fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
@@ -1064,7 +1157,12 @@ pub fn run() {
             compare_files,
             diff_against_working,
             merge_into,
-            rebase_branch_onto
+            rebase_branch_onto,
+            open_in_explorer,
+            open_in_vscode,
+            commit_tree,
+            commit_numstat,
+            file_at_commit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

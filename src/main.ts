@@ -196,6 +196,53 @@ function closeSearch() {
 const refKey = (r: { kind: string; name: string }) => `${r.kind}:${r.name}`;
 
 // drag-drop: menu shown when a branch is dropped onto another
+// drag a splitter to resize the sidebar / detail panel
+function setupSplitter(id: string, panelId: string, side: "left" | "right") {
+  const sp = document.getElementById(id);
+  const panel = document.getElementById(panelId);
+  if (!sp || !panel) return;
+  sp.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    sp.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    const move = (ev: MouseEvent) => {
+      const r = panel.getBoundingClientRect();
+      let w = side === "left" ? ev.clientX - r.left : r.right - ev.clientX;
+      w = Math.max(140, Math.min(700, w));
+      panel.style.flex = `0 0 ${w}px`;
+      schedulePaint();
+    };
+    const up = () => {
+      sp.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+}
+
+// keep several scroll containers in lockstep (vertical + horizontal)
+function linkScroll(ids: string[]) {
+  const els = ids
+    .map((id) => document.getElementById(id))
+    .filter((e): e is HTMLElement => !!e);
+  let lock = false;
+  for (const src of els) {
+    src.addEventListener("scroll", () => {
+      if (lock) return;
+      lock = true;
+      for (const o of els)
+        if (o !== src) {
+          o.scrollTop = src.scrollTop;
+          o.scrollLeft = src.scrollLeft;
+        }
+      requestAnimationFrame(() => (lock = false));
+    });
+  }
+}
+
 function showBranchDropMenu(
   x: number,
   y: number,
@@ -370,6 +417,10 @@ function renderTabs() {
     });
     chip.appendChild(name);
     chip.appendChild(close);
+    chip.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, repoMenu(t.repo.path));
+    });
     strip.appendChild(chip);
   });
 }
@@ -548,6 +599,11 @@ function renderSidebar(t: Tab) {
         li.title = r.full + (remoteOnly ? "  (not checked out locally)" : "");
         li.addEventListener("click", () => {
           if (r.target) selectNode(findById(t, r.target) ?? null, true);
+        });
+        li.addEventListener("dblclick", () => {
+          const isRemote = r.kind === "remote";
+          const target = isRemote ? r.name.split("/").slice(1).join("/") : r.name;
+          doCheckoutConfirm(t, target, isRemote ? r.name : undefined);
         });
         li.addEventListener("contextmenu", (e) => {
           e.preventDefault();
@@ -763,6 +819,13 @@ function renderGraph(t: Tab) {
   (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphW}px`;
   $("rows").style.height = `${totalH}px`;
 
+  // min content width so the message column isn't cut off on narrow windows
+  // (horizontal scroll kicks in instead of truncating)
+  const MSG_MIN = 420;
+  const contentW = REF_W + graphW + MSG_MIN;
+  $("graph-content").style.minWidth = `${contentW}px`;
+  $("col-headers").style.minWidth = `${contentW}px`;
+
   gctx = { tab: t, placed, byId, refsByHash, graphW };
   $("empty").classList.add("hidden");
   paintViewport();
@@ -774,20 +837,73 @@ function paintViewport() {
   const { tab: t, placed, byId, refsByHash, graphW } = gctx;
   const repo = t.repo;
 
-  // lineage set for the selected node (+ ancestors)
-  let related: Set<string> | null = null;
+  // lineage: highlight the whole branch line — ancestors AND descendants
+  // (so you can see where this commit's branch head is), dim the rest.
+  // 3-level highlight when a node is selected:
+  //  2 = the branch line (first-parent chain, up + down to the head)
+  //  1 = every other commit that led here (all ancestors via any parent)
+  //  0 = unrelated -> dimmed
+  let branchLine: Set<string> | null = null;
+  let connected: Set<string> | null = null; // ancestors + all descendants
   if (t.selected && byId.has(t.selected)) {
-    related = new Set<string>();
-    const stack = [t.selected];
-    while (stack.length) {
-      const id = stack.pop()!;
-      if (related.has(id)) continue;
-      related.add(id);
+    branchLine = new Set<string>();
+    connected = new Set<string>();
+    // children maps: first-parent (branch line) and all-parent (full descendants)
+    const childFP = new Map<string, string[]>();
+    const childAll = new Map<string, string[]>();
+    for (const p of placed) {
+      p.node.parents.forEach((par, idx) => {
+        if (!byId.has(par)) return;
+        (childAll.get(par) ?? childAll.set(par, []).get(par)!).push(p.node.id);
+        if (idx === 0) (childFP.get(par) ?? childFP.set(par, []).get(par)!).push(p.node.id);
+      });
+    }
+    // branch line: first-parent ancestors
+    let c2: string | undefined = t.selected;
+    while (c2 && !branchLine.has(c2)) {
+      branchLine.add(c2);
+      const fp: string | undefined = byId.get(c2)?.node.parents[0];
+      c2 = fp && byId.has(fp) ? fp : undefined;
+    }
+    // branch line: first-parent descendants (to the head)
+    const fp = [t.selected];
+    const seenFP = new Set<string>();
+    while (fp.length) {
+      const id = fp.pop()!;
+      if (seenFP.has(id)) continue;
+      seenFP.add(id);
+      branchLine.add(id);
+      for (const ch of childFP.get(id) ?? []) fp.push(ch);
+    }
+    // connected: all ancestors (led here) + all descendants (everywhere it contributes)
+    const up = [t.selected];
+    while (up.length) {
+      const id = up.pop()!;
+      if (connected.has(id)) continue;
+      connected.add(id);
       const pp = byId.get(id);
-      if (pp) for (const par of pp.node.parents) if (byId.has(par)) stack.push(par);
+      if (pp) for (const par of pp.node.parents) if (byId.has(par)) up.push(par);
+    }
+    const down = [t.selected];
+    const seenDn = new Set<string>();
+    while (down.length) {
+      const id = down.pop()!;
+      if (seenDn.has(id)) continue;
+      seenDn.add(id);
+      connected.add(id);
+      for (const ch of childAll.get(id) ?? []) down.push(ch);
     }
   }
-  const dimId = (id: string) => related !== null && !related.has(id);
+  const levelOf = (id: string): number =>
+    branchLine === null ? 2 : branchLine.has(id) ? 2 : connected!.has(id) ? 1 : 0;
+  const edgeOp = (a: string, b: string) => {
+    const l = Math.min(levelOf(a), levelOf(b));
+    return l === 2 ? "" : l === 1 ? ` opacity="0.5"` : ` opacity="0.13"`;
+  };
+  const nodeOp = (id: string) => {
+    const l = levelOf(id);
+    return l === 2 ? "" : l === 1 ? ` opacity="0.55"` : ` opacity="0.16"`;
+  };
 
   const scroll = $("scroll");
   const top = scroll.scrollTop;
@@ -813,14 +929,14 @@ function paintViewport() {
           ? `M ${cx} ${cy} L ${px} ${py}`
           : `M ${cx} ${cy} C ${cx} ${midY}, ${px} ${midY}, ${px} ${py}`;
       const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
-      const op = dimId(p.node.id) ? ` opacity="0.13"` : "";
+      const op = edgeOp(p.node.id, ph);
       parts.push(`<path d="${d}" fill="none" stroke="${pp.color}" stroke-width="2"${dash}${op}/>`);
     }
   }
   for (let i = start; i < end; i++) {
     const p = placed[i];
     const x = laneX(p.lane), y = rowY(p.row);
-    const op = dimId(p.node.id) ? ` opacity="0.16"` : "";
+    const op = nodeOp(p.node.id);
     if (p.node.kind === "stash") {
       const sz = 11;
       parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="#1e1e2a" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
@@ -849,7 +965,9 @@ function paintViewport() {
     row.dataset.id = n.id;
     row.style.top = `${p.row * ROW_H}px`;
     if (n.id === t.selected) row.classList.add("selected");
-    if (dimId(n.id)) row.classList.add("dim");
+    const lvl = levelOf(n.id);
+    if (lvl === 0) row.classList.add("dim");
+    else if (lvl === 1) row.classList.add("dim-mid");
 
     let refHtml = "";
     let msgHtml = "";
@@ -910,6 +1028,15 @@ function attachRowEvents(
   row.querySelectorAll<HTMLElement>(".col-ref .badge[data-refname]").forEach((b) => {
     const name = b.dataset.refname!;
     const isLocal = b.dataset.refkind === "local";
+    // double-click a branch/tag badge -> checkout
+    b.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      const t = cur();
+      if (!t) return;
+      const isRemote = b.dataset.refkind === "remote";
+      const target = isRemote ? name.split("/").slice(1).join("/") : name;
+      doCheckoutConfirm(t, target, isRemote ? name : undefined);
+    });
     if (isLocal) {
       b.draggable = true;
       b.addEventListener("dragstart", (e) => {
@@ -1094,35 +1221,243 @@ async function selectNode(n: GNode | null, scroll = false) {
 }
 
 // hash === null means WIP (working tree)
+let filesTreeMode = false;
+let filesAllMode = false; // show whole project tree
+let lastFiles: { files: FileChange[]; path: string; hash: string | null } | null = null;
+interface TNode { name: string; path: string; dir: boolean; children: TNode[]; }
+let projectCache: {
+  hash: string | null;
+  root: TNode;
+  num: Map<string, { a: number; d: number }>;
+  expanded: Set<string>;
+} | null = null;
+
+function buildTree(paths: string[]): TNode {
+  const root: TNode = { name: "", path: "", dir: true, children: [] };
+  for (const fp of paths) {
+    const parts = fp.split("/");
+    let node = root;
+    let acc = "";
+    parts.forEach((part, i) => {
+      acc = acc ? acc + "/" + part : part;
+      const isFile = i === parts.length - 1;
+      let child = node.children.find((c) => c.name === part && c.dir === !isFile);
+      if (!child) {
+        child = { name: part, path: acc, dir: !isFile, children: [] };
+        node.children.push(child);
+      }
+      node = child;
+    });
+  }
+  const sortRec = (n: TNode) => {
+    n.children.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+    n.children.forEach(sortRec);
+  };
+  sortRec(root);
+  return root;
+}
+
+let lastNum: Map<string, { a: number; d: number }> = new Map();
+
 async function loadFiles(path: string, hash: string | null) {
   const filesUl = $("d-files");
   filesUl.innerHTML = "<li class='muted'>loading…</li>";
   try {
-    const files = hash
-      ? await invoke<FileChange[]>("commit_files", { path, hash })
-      : await invoke<FileChange[]>("wip_files", { path });
-    filesUl.innerHTML = "";
-    if (!files.length) {
-      filesUl.innerHTML = "<li class='muted'>(no file changes)</li>";
-    }
-    files.forEach((f) => {
-      const li = document.createElement("li");
-      const s = f.status.charAt(0).toUpperCase();
-      const cls = s === "?" ? "Q" : s;
-      li.innerHTML = `<span class="fstatus ${cls}">${s}</span><span>${escapeHtml(
-        f.path
-      )}</span>`;
-      li.addEventListener("click", () => {
-        filesUl
-          .querySelectorAll("li")
-          .forEach((x) => x.classList.remove("selected"));
-        li.classList.add("selected");
-        openDiff(f.path, path, f.path, hash);
-      });
-      filesUl.appendChild(li);
-    });
+    const [files, num] = await Promise.all([
+      hash
+        ? invoke<FileChange[]>("commit_files", { path, hash })
+        : invoke<FileChange[]>("wip_files", { path }),
+      invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", {
+        path,
+        hash: hash ?? "",
+      }).catch(() => []),
+    ]);
+    lastNum = new Map(num.map((n) => [n.path, { a: n.added, d: n.deleted }]));
+    lastFiles = { files, path, hash };
+    renderFileList();
   } catch (e) {
     filesUl.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
+  }
+}
+
+function numBadge(file: string): string {
+  const ns = lastNum.get(file);
+  if (!ns) return "";
+  const add = ns.a < 0 ? "" : `<span class="ns-add">+${ns.a}</span>`;
+  const del = ns.d < 0 ? "" : `<span class="ns-del">−${ns.d}</span>`;
+  const bin = ns.a < 0 || ns.d < 0 ? `<span class="ns-bin">bin</span>` : "";
+  return `<span class="numstat">${add}${del}${bin}</span>`;
+}
+
+function fileRow(f: FileChange, depth: number, label: string, path: string, hash: string | null): HTMLLIElement {
+  const li = document.createElement("li");
+  const s = f.status.charAt(0).toUpperCase();
+  const cls = s === "?" ? "Q" : s;
+  li.style.paddingLeft = `${6 + depth * 14}px`;
+  li.innerHTML =
+    `<span class="fstatus ${cls}">${s}</span>` +
+    `<span class="fpath">${escapeHtml(label)}</span>` +
+    numBadge(f.path);
+  li.addEventListener("click", () => {
+    $("d-files").querySelectorAll("li").forEach((x) => x.classList.remove("selected"));
+    li.classList.add("selected");
+    openDiff(f.path, path, f.path, hash);
+  });
+  return li;
+}
+
+async function loadProject() {
+  if (!lastFiles) return;
+  const { path, hash } = lastFiles;
+  const ul = $("d-files");
+  if (!projectCache || projectCache.hash !== hash) {
+    ul.innerHTML = "<li class='muted'>loading project…</li>";
+    try {
+      const [tree, num] = await Promise.all([
+        invoke<string[]>("commit_tree", { path, hash: hash ?? "" }),
+        invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", { path, hash: hash ?? "" }),
+      ]);
+      const m = new Map<string, { a: number; d: number }>();
+      for (const n of num) m.set(n.path, { a: n.added, d: n.deleted });
+      // collapse everything except the folders leading to a changed file
+      const expanded = new Set<string>();
+      for (const fp of m.keys()) {
+        const parts = fp.split("/");
+        let acc = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+          acc = acc ? acc + "/" + parts[i] : parts[i];
+          expanded.add(acc);
+        }
+      }
+      projectCache = { hash, root: buildTree(tree), num: m, expanded };
+    } catch (e) {
+      ul.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
+      return;
+    }
+  }
+  if (filesAllMode) renderProjectTree();
+}
+
+// show the WHOLE file (content at the commit / working tree), with line numbers
+async function openFileContent(path: string, hash: string | null, file: string) {
+  const rev = hash ?? "";
+  const title = `${file} @ ${hash ? hash.slice(0, 8) : "working"}`;
+  if (isImage(file)) {
+    $("diffview-title").textContent = title;
+    $("diff-minimap").innerHTML = "";
+    showDiffView(true);
+    const url = await invoke<string>("blob_data_url", { path, rev, file }).catch(() => "");
+    $("diffview-body").innerHTML = url
+      ? `<div class="imgdiff"><div class="imgpane"><div class="imglabel">${escapeHtml(file)}</div><div class="imgwrap"><img src="${url}"/></div></div></div>`
+      : `<div class='dl ctx'><span class='dc'>(no image data)</span></div>`;
+    return;
+  }
+  $("diffview-title").textContent = title;
+  $("diff-minimap").innerHTML = "";
+  $("diffview-body").innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  showDiffView(true);
+  try {
+    const txt = await invoke<string>("file_at_commit", { path, hash: rev, file });
+    const lines = txt.split("\n");
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    $("diffview-body").innerHTML =
+      lines
+        .map(
+          (l, i) =>
+            `<div class="dl ctx"><span class="ln">${i + 1}</span><span class="ln"></span><span class="dc">${escapeHtml(l)}</span></div>`
+        )
+        .join("") || "<div class='dl ctx'><span class='dc'>(empty file)</span></div>";
+  } catch (e) {
+    $("diffview-body").innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+  }
+}
+
+function renderProjectTree() {
+  if (!projectCache || !lastFiles) return;
+  const { path, hash } = lastFiles;
+  const { root, num, expanded } = projectCache;
+  const ul = $("d-files");
+  ul.innerHTML = "";
+
+  const walk = (node: TNode, depth: number) => {
+    for (const c of node.children) {
+      if (c.dir) {
+        const open = expanded.has(c.path);
+        const li = document.createElement("li");
+        li.className = "tree-dir";
+        li.style.paddingLeft = `${6 + depth * 14}px`;
+        li.innerHTML =
+          `<span class="tchev">${open ? "▾" : "▸"}</span>` +
+          `<span class="fdir">${escapeHtml(c.name)}</span>`;
+        li.addEventListener("click", () => {
+          if (expanded.has(c.path)) expanded.delete(c.path);
+          else expanded.add(c.path);
+          renderProjectTree();
+        });
+        ul.appendChild(li);
+        if (open) walk(c, depth + 1);
+      } else {
+        const ns = num.get(c.path);
+        const li = document.createElement("li");
+        li.style.paddingLeft = `${6 + depth * 14}px`;
+        if (ns) li.classList.add("changed-file");
+        let badge = "";
+        if (ns) {
+          const add = ns.a < 0 ? "" : `<span class="ns-add">+${ns.a}</span>`;
+          const del = ns.d < 0 ? "" : `<span class="ns-del">−${ns.d}</span>`;
+          const bin = ns.a < 0 || ns.d < 0 ? `<span class="ns-bin">bin</span>` : "";
+          badge = `<span class="numstat">${add}${del}${bin}</span>`;
+        }
+        li.innerHTML = `<span class="fpath">${escapeHtml(c.name)}</span>${badge}`;
+        li.addEventListener("click", () => {
+          ul.querySelectorAll("li").forEach((x) => x.classList.remove("selected"));
+          li.classList.add("selected");
+          // changed file -> show its diff; unchanged -> show whole file content
+          if (num.has(c.path)) openDiff(c.path, path, c.path, hash);
+          else openFileContent(path, hash, c.path);
+        });
+        ul.appendChild(li);
+      }
+    }
+  };
+  walk(root, 0);
+}
+
+function renderFileList() {
+  if (!lastFiles) return;
+  if (filesAllMode) {
+    loadProject();
+    return;
+  }
+  const { files, path, hash } = lastFiles;
+  const ul = $("d-files");
+  ul.innerHTML = "";
+  if (!files.length) {
+    ul.innerHTML = "<li class='muted'>(no file changes)</li>";
+    return;
+  }
+  if (!filesTreeMode) {
+    files.forEach((f) => ul.appendChild(fileRow(f, 0, f.path, path, hash)));
+    return;
+  }
+  // folder tree: group by directory, show folder rows + file leaves
+  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const shownDirs = new Set<string>();
+  for (const f of sorted) {
+    const parts = f.path.split("/");
+    // emit folder rows for any new ancestor directories
+    for (let d = 0; d < parts.length - 1; d++) {
+      const dir = parts.slice(0, d + 1).join("/");
+      if (!shownDirs.has(dir)) {
+        shownDirs.add(dir);
+        const li = document.createElement("li");
+        li.className = "tree-dir";
+        li.style.paddingLeft = `${6 + d * 14}px`;
+        li.innerHTML = `<span class="fdir">📁 ${escapeHtml(parts[d])}</span>`;
+        ul.appendChild(li);
+      }
+    }
+    ul.appendChild(fileRow(f, parts.length - 1, parts[parts.length - 1], path, hash));
   }
 }
 
@@ -1163,7 +1498,7 @@ async function loadRepo(path: string, silent = false) {
   } catch (e) {
     setStatus("");
     if (silent) console.warn("skip repo", path, String(e));
-    else alert("Could not open repo:\n" + String(e));
+    else errorModal("Could not open repo:\n" + String(e));
   }
 }
 
@@ -1318,9 +1653,13 @@ async function refreshCommitFiles() {
         `<span class="fstatus ${cls}">${s}</span>` +
         `<span class="fpath">${escapeHtml(f.path)}</span>` +
         `<button class="mini stagebtn">${stage ? "Stage" : "Unstage"}</button>`;
-      li.querySelector(".fpath")?.addEventListener("click", () =>
-        openDiff(f.path, path, f.path, null)
-      );
+      li.querySelector(".fpath")?.addEventListener("click", () => {
+        document
+          .querySelectorAll("#c-unstaged li.selected, #c-staged li.selected")
+          .forEach((x) => x.classList.remove("selected"));
+        li.classList.add("selected");
+        openDiff(f.path, path, f.path, null);
+      });
       li.querySelector(".stagebtn")?.addEventListener("click", (e) => {
         e.stopPropagation();
         stage ? doStage(f.path) : doUnstage(f.path);
@@ -1570,7 +1909,7 @@ async function saveResolved() {
     mvFile = "";
     await reloadActive("Resolved file");
   } catch (e) {
-    alert("Save failed:\n" + String(e));
+    errorModal("Save failed:\n" + String(e));
   }
 }
 
@@ -1774,7 +2113,7 @@ async function doStage(file: string) {
     await invoke("stage_file", { path: t.repo.path, file });
     await afterStageChange();
   } catch (e) {
-    alert(String(e));
+    errorModal(String(e));
   }
 }
 async function doUnstage(file: string) {
@@ -1784,7 +2123,7 @@ async function doUnstage(file: string) {
     await invoke("unstage_file", { path: t.repo.path, file });
     await afterStageChange();
   } catch (e) {
-    alert(String(e));
+    errorModal(String(e));
   }
 }
 async function doStageAll() {
@@ -1794,7 +2133,7 @@ async function doStageAll() {
     await invoke("stage_all", { path: t.repo.path });
     await afterStageChange();
   } catch (e) {
-    alert(String(e));
+    errorModal(String(e));
   }
 }
 async function doUnstageAll() {
@@ -1804,7 +2143,7 @@ async function doUnstageAll() {
     await invoke("unstage_all", { path: t.repo.path });
     await afterStageChange();
   } catch (e) {
-    alert(String(e));
+    errorModal(String(e));
   }
 }
 async function doCommit() {
@@ -1823,7 +2162,7 @@ async function doCommit() {
     ($("c-amend") as HTMLInputElement).checked = false;
     await reloadActive("Committed");
   } catch (e) {
-    alert("Commit failed:\n" + String(e));
+    errorModal("Commit failed:\n" + String(e));
   } finally {
     popBusy();
   }
@@ -1934,8 +2273,40 @@ async function reloadActive(statusMsg?: string) {
     if (statusMsg) setStatus(statusMsg);
     refreshRemoteTags(t);
   } catch (e) {
-    alert("Reload failed:\n" + String(e));
+    errorModal("Reload failed:\n" + String(e));
   }
+}
+
+// double-click checkout: confirm first if there are uncommitted changes
+async function doCheckoutConfirm(t: Tab, target: string, upstream?: string) {
+  if (t.repo.wip) {
+    const ok = await confirmModal(
+      `Checkout ${target}? Uncommitted changes will be stashed.`
+    );
+    if (!ok) return;
+  }
+  doCheckout(target, upstream);
+}
+
+// right-click on a repo (tab / path) -> open it externally
+function repoMenu(path: string): MenuItem[] {
+  return [
+    {
+      label: "Open in File Explorer",
+      action: () => invoke("open_in_explorer", { path }).catch((e) => errorModal(String(e))),
+    },
+    {
+      label: "Open in VS Code",
+      action: () =>
+        invoke("open_in_vscode", { path }).catch(() =>
+          errorModal("Could not launch VS Code — is 'code' on your PATH?")
+        ),
+    },
+    {
+      label: "Open Terminal here",
+      action: () => invoke("open_terminal", { path }).catch((e) => errorModal(String(e))),
+    },
+  ];
 }
 
 async function doCheckout(target: string, upstream?: string) {
@@ -1956,7 +2327,7 @@ async function doCheckout(target: string, upstream?: string) {
     );
   } catch (e) {
     setStatus("");
-    alert("Checkout failed:\n" + String(e));
+    errorModal("Checkout failed:\n" + String(e));
   } finally {
     popBusy();
   }
@@ -1972,7 +2343,7 @@ async function doFetch() {
     await reloadActive("Fetched");
   } catch (e) {
     setStatus("");
-    alert("Fetch failed:\n" + String(e));
+    errorModal("Fetch failed:\n" + String(e));
   } finally {
     popBusy();
   }
@@ -1994,7 +2365,7 @@ async function doPush() {
     await reloadActive(msg);
   } catch (e) {
     setStatus("");
-    alert("Push failed:\n" + String(e));
+    errorModal("Push failed:\n" + String(e));
   } finally {
     popBusy();
   }
@@ -2021,7 +2392,7 @@ async function doTerminal() {
   try {
     await invoke("open_terminal", { path: t.repo.path });
   } catch (e) {
-    alert("Open terminal failed:\n" + String(e));
+    errorModal("Open terminal failed:\n" + String(e));
   }
 }
 
@@ -2160,10 +2531,29 @@ async function runAction(p: Promise<unknown>, okMsg: string, btnId?: string) {
     await reloadActive(stashed === true ? `${okMsg} (changes stashed)` : okMsg);
   } catch (e) {
     setStatus("");
-    alert(`${okMsg} failed:\n${String(e)}`);
+    errorModal(`${okMsg} failed:\n${String(e)}`);
   } finally {
     popBusy();
   }
+}
+
+function errorModal(msg: string) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML =
+    `<div class="modal error-modal">` +
+    `<div class="error-head"><span class="error-bang">!</span><span>Something went wrong</span></div>` +
+    `<pre class="error-msg">${escapeHtml(msg)}</pre>` +
+    `<div class="modal-btns"><button class="modal-ok">OK</button></div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const ok = overlay.querySelector(".modal-ok") as HTMLButtonElement | null;
+  ok?.addEventListener("click", close);
+  ok?.focus();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
 }
 
 function confirmModal(title: string): Promise<boolean> {
@@ -2595,11 +2985,32 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  // sync-scroll the 3 merge-resolver panes so lines stay aligned
+  linkScroll(["mv-ours-code", "mv-theirs-code", "mv-result", "mv-output"]);
+  setupSplitter("split-left", "sidebar", "left");
+  setupSplitter("split-right", "detail", "right");
+  $("d-tree-toggle").addEventListener("click", () => {
+    filesTreeMode = !filesTreeMode;
+    $("d-tree-toggle").textContent = filesTreeMode ? "Flat" : "Tree";
+    renderFileList();
+  });
+  $("d-all-toggle").addEventListener("click", () => {
+    filesAllMode = !filesAllMode;
+    $("d-all-toggle").textContent = filesAllMode ? "Changed" : "Project";
+    $("d-files-label").textContent = filesAllMode ? "Project files" : "Changed files";
+    ($("d-tree-toggle") as HTMLElement).style.display = filesAllMode ? "none" : "";
+    renderFileList();
+  });
   $("scroll").addEventListener("scroll", schedulePaint, { passive: true });
   window.addEventListener("resize", schedulePaint);
   $("detail-close").addEventListener("click", () =>
     $("detail").classList.add("collapsed")
   );
+  $("repo-path").addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const t = cur();
+    if (t) showMenu(e.clientX, e.clientY, repoMenu(t.repo.path));
+  });
   $("sb-right").addEventListener("click", showAbout);
   $("search-btn").addEventListener("click", (e) => {
     e.stopPropagation();

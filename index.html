@@ -98,17 +98,20 @@
             <ul id="tags" class="reflist"></ul>
           </div>
         </aside>
+        <div class="splitter" id="split-left"></div>
 
         <main id="graphpane">
-          <div id="col-headers">
-            <div class="ch ch-ref">Branch / Tag</div>
-            <div class="ch ch-graph">Graph</div>
-            <div class="ch ch-msg">Commit message</div>
-          </div>
           <div id="scroll">
-            <svg id="graph-svg"></svg>
-            <div id="rows"></div>
-            <div id="empty" class="empty">Open a repository to view its commit graph.</div>
+            <div id="col-headers">
+              <div class="ch ch-ref">Branch / Tag</div>
+              <div class="ch ch-graph">Graph</div>
+              <div class="ch ch-msg">Commit message</div>
+            </div>
+            <div id="graph-content">
+              <svg id="graph-svg"></svg>
+              <div id="rows"></div>
+              <div id="empty" class="empty">Open a repository to view its commit graph.</div>
+            </div>
           </div>
           <div id="diffview" class="hidden">
             <div id="diffview-head">
@@ -149,6 +152,7 @@
           </div>
         </main>
 
+        <div class="splitter" id="split-right"></div>
         <section id="detail">
           <button id="detail-close" title="Close panel">✕</button>
           <div id="detail-empty" class="muted">Select a commit.</div>
@@ -198,7 +202,13 @@
           <div id="detail-body" class="hidden">
             <div id="d-summary" class="d-summary"></div>
             <div id="d-meta" class="d-meta"></div>
-            <div class="d-title">Changed files</div>
+            <div class="d-title d-files-head">
+              <span id="d-files-label">Changed files</span>
+              <span class="d-files-btns">
+                <button id="d-tree-toggle" class="mini" title="Toggle folder tree">Tree</button>
+                <button id="d-all-toggle" class="mini" title="Show the whole project tree">Project</button>
+              </span>
+            </div>
             <ul id="d-files" class="filelist"></ul>
           </div>
         </section>
