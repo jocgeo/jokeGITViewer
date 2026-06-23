@@ -490,6 +490,43 @@ function showAbout() {
   });
 }
 
+// a.b.c version compare — is `a` newer than `b`?
+function isNewerVersion(a: string, b: string): boolean {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = (b || "0").split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+
+// check GitHub for a newer release; show a banner with a download link
+async function checkForUpdate() {
+  try {
+    const res = await fetch(
+      "https://api.github.com/repos/jocgeo/jokeGITViewer/releases/latest",
+      { headers: { Accept: "application/vnd.github+json" } }
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    const tag = String(data.tag_name ?? "").replace(/^v/, "");
+    const url = String(data.html_url ?? "https://github.com/jocgeo/jokeGITViewer/releases");
+    if (!tag || !appVersion || !isNewerVersion(tag, appVersion)) return;
+    const b = $("update-banner");
+    b.innerHTML =
+      `<span>🔔 jokeGITViewer <b>v${escapeHtml(tag)}</b> is available — you have v${escapeHtml(appVersion)}</span>` +
+      `<span class="ub-btns"><button id="ub-download">Download</button><button id="ub-dismiss" title="Dismiss">✕</button></span>`;
+    b.classList.remove("hidden");
+    $("ub-download").addEventListener("click", () => openUrl(url).catch(() => {}));
+    $("ub-dismiss").addEventListener("click", () => b.classList.add("hidden"));
+  } catch {
+    /* offline / rate-limited — ignore */
+  }
+}
+
 let appVersion = "";
 function updateStatusBar(t: Tab | null) {
   const right = appVersion ? `jokeGITViewer v${appVersion}` : "jokeGITViewer";
@@ -3038,6 +3075,7 @@ window.addEventListener("DOMContentLoaded", () => {
     .then((v) => {
       appVersion = v;
       updateStatusBar(cur());
+      checkForUpdate();
     })
     .catch(() => {});
   renderTabs();
