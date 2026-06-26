@@ -67,6 +67,7 @@
 
       <div id="tabstrip"></div>
       <div id="update-banner" class="hidden"></div>
+      <div id="hist-filter" class="hidden"></div>
 
       <div id="body">
         <aside id="sidebar">
@@ -98,6 +99,13 @@
             </div>
             <ul id="tags" class="reflist"></ul>
           </div>
+          <div class="side-section" data-sec="submodule">
+            <div class="side-head">
+              <span class="chev">▸</span><span class="sicon"></span>
+              <span class="lbl">Submodules</span><span class="count" id="count-submodule">0</span>
+            </div>
+            <ul id="submodules-list" class="reflist"></ul>
+          </div>
         </aside>
         <div class="splitter" id="split-left"></div>
 
@@ -117,7 +125,11 @@
           <div id="diffview" class="hidden">
             <div id="diffview-head">
               <span id="diffview-title"></span>
-              <button id="diffview-close" class="mini">✕ Close</button>
+              <span class="dv-btns">
+                <button id="diffview-history" class="mini" title="History of this file">History</button>
+                <button id="diffview-blame" class="mini" title="Show blame (who/when per line)">Blame</button>
+                <button id="diffview-close" class="mini">✕ Close</button>
+              </span>
             </div>
             <div id="diff-main">
               <div id="diffview-body"></div>

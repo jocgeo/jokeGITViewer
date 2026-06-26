@@ -52,6 +52,7 @@ interface RepoData {
   wip: WipStatus | null;
   conflict: ConflictState;
   describe: string;
+  submodules: { name: string; path: string; abs: string }[];
 }
 
 // ---- unified graph node ----
@@ -83,6 +84,7 @@ interface Tab {
   hint?: { hash: string; branch: string }; // "which branch" ghost for selected commit
   hidden?: Set<string>; // ref keys hidden from the graph
   stale?: boolean; // loaded from cache, needs a background refresh
+  parentPath?: string; // set when this tab is a submodule of another repo
 }
 
 // ---- layout constants ----
@@ -403,10 +405,18 @@ function renderTabs() {
   strip.classList.remove("hidden");
   tabs.forEach((t, i) => {
     const chip = document.createElement("div");
-    chip.className = "tab" + (i === active ? " active" : "");
-    chip.title = t.repo.path;
+    chip.className = "tab" + (i === active ? " active" : "") + (t.parentPath ? " tab-sub" : "");
+    chip.title = t.parentPath ? `${t.parentPath}\n  └ submodule: ${t.repo.path}` : t.repo.path;
     const name = document.createElement("span");
-    name.textContent = basename(t.repo.path);
+    if (t.parentPath) {
+      name.className = "tab-name-sub";
+      name.innerHTML =
+        `<span class="tab-ic">${icon("submodule")}</span>` +
+        `<span class="tab-parent">${escapeHtml(basename(t.parentPath))} ▸</span>` +
+        `<span class="tab-self">${escapeHtml(basename(t.repo.path))}</span>`;
+    } else {
+      name.textContent = basename(t.repo.path);
+    }
     name.addEventListener("click", () => switchTab(i));
     const close = document.createElement("span");
     close.className = "tab-close";
@@ -711,6 +721,23 @@ function renderSidebar(t: Tab) {
   if (!sul.children.length) {
     sul.innerHTML = `<li class="muted empty-mini">none</li>`;
   }
+
+  // submodules — click to open as their own repo tab
+  const subUl = $("submodules-list");
+  subUl.innerHTML = "";
+  $("count-submodule").textContent = String(repo.submodules.length);
+  repo.submodules.forEach((sm) => {
+    const li = document.createElement("li");
+    li.innerHTML =
+      `<span class="ricon">${icon("submodule")}</span>` +
+      `<span class="rname">${escapeHtml(sm.name)}</span>`;
+    li.title = `${sm.path}\nOpen as repository`;
+    li.addEventListener("click", () => loadRepo(sm.abs, false, repo.path));
+    subUl.appendChild(li);
+  });
+  if (!subUl.children.length) {
+    subUl.innerHTML = `<li class="muted empty-mini">none</li>`;
+  }
 }
 
 // A display unit groups refs at a commit: a local branch is merged with its
@@ -931,8 +958,11 @@ function paintViewport() {
       for (const ch of childAll.get(id) ?? []) down.push(ch);
     }
   }
-  const levelOf = (id: string): number =>
-    branchLine === null ? 2 : branchLine.has(id) ? 2 : connected!.has(id) ? 1 : 0;
+  const levelOf = (id: string): number => {
+    // file-history highlight overrides: only file-changing commits are bright
+    if (fileHistoryHL) return fileHistoryHL.has(id) ? 2 : 0;
+    return branchLine === null ? 2 : branchLine.has(id) ? 2 : connected!.has(id) ? 1 : 0;
+  };
   const edgeOp = (a: string, b: string) => {
     const l = Math.min(levelOf(a), levelOf(b));
     return l === 2 ? "" : l === 1 ? ` opacity="0.5"` : ` opacity="0.13"`;
@@ -960,11 +990,17 @@ function paintViewport() {
       if (b < start || a > end) continue; // segment off-screen
       const cx = laneX(p.lane), cy = rowY(p.row);
       const px = laneX(pp.lane), py = rowY(pp.row);
-      const midY = (cy + py) / 2;
-      const d =
-        px === cx
-          ? `M ${cx} ${cy} L ${px} ${py}`
-          : `M ${cx} ${cy} C ${cx} ${midY}, ${px} ${midY}, ${px} ${py}`;
+      // straight in-lane; orthogonal (90° rounded corner) across lanes so
+      // branches/merges read clearly. Parent is below (py > cy).
+      let d: string;
+      if (px === cx) {
+        d = `M ${cx} ${cy} L ${px} ${py}`;
+      } else {
+        const r = Math.min(8, Math.abs(px - cx) / 2, Math.abs(py - cy) / 2);
+        const dir = px > cx ? 1 : -1;
+        // down the child's lane, round the corner, then straight into the parent
+        d = `M ${cx} ${cy} L ${cx} ${py - r} Q ${cx} ${py} ${cx + dir * r} ${py} L ${px} ${py}`;
+      }
       const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
       const op = edgeOp(p.node.id, ph);
       parts.push(`<path d="${d}" fill="none" stroke="${pp.color}" stroke-width="2"${dash}${op}/>`);
@@ -1040,6 +1076,7 @@ function paintViewport() {
       }
       msgHtml =
         `<span class="summary">${escapeHtml(c.summary)}</span>` +
+        fileHistNumBadge(c.hash) +
         `<span class="author">${escapeHtml(c.author)}</span>` +
         `<span class="date">${fmtDate(c.time)}</span>` +
         `<span class="hash">${c.hash.slice(0, 8)}</span>`;
@@ -1375,8 +1412,106 @@ async function loadProject() {
   if (filesAllMode) renderProjectTree();
 }
 
+// file history highlight: keep the full graph, brighten only commits that
+// changed this file (dim the rest) and show +/- counts on those rows.
+let fileHistoryHL: Set<string> | null = null;
+let fileHistoryNum: Map<string, { a: number; d: number }> = new Map();
+
+async function showFileHistory() {
+  if (!diffCtx) return;
+  const { path, file } = diffCtx;
+  let hist: {
+    hash: string;
+    author: string;
+    time: number;
+    summary: string;
+    added: number;
+    deleted: number;
+  }[];
+  try {
+    hist = await invoke("file_history", { path, file });
+  } catch (e) {
+    errorModal(String(e));
+    return;
+  }
+  fileHistoryHL = new Set(hist.map((h) => h.hash));
+  fileHistoryNum = new Map(hist.map((h) => [h.hash, { a: h.added, d: h.deleted }]));
+  // back to the full graph; highlight applies there
+  showDiffView(false);
+  const t = cur();
+  if (t) renderGraph(t);
+  const b = $("hist-filter");
+  b.innerHTML = `<span>📄 History: <b>${escapeHtml(file)}</b> — ${hist.length} commit(s) highlighted</span><button id="hist-clear" title="Clear">✕</button>`;
+  b.classList.remove("hidden");
+  $("hist-clear").addEventListener("click", clearFileHistory);
+}
+
+function fileHistNumBadge(hash: string): string {
+  const ns = fileHistoryNum.get(hash);
+  if (!ns) return "";
+  const add = ns.a < 0 ? "" : `<span class="ns-add">+${ns.a}</span>`;
+  const del = ns.d < 0 ? "" : `<span class="ns-del">−${ns.d}</span>`;
+  const bin = ns.a < 0 || ns.d < 0 ? `<span class="ns-bin">bin</span>` : "";
+  return `<span class="numstat">${add}${del}${bin}</span>`;
+}
+
+function clearFileHistory() {
+  fileHistoryHL = null;
+  fileHistoryNum = new Map();
+  $("hist-filter").classList.add("hidden");
+  const t = cur();
+  if (t) renderGraph(t);
+}
+
+// blame view: each line shows who/when; click a line to jump to that commit
+async function showBlame() {
+  if (!diffCtx) return;
+  setBlameBtn(true);
+  const { path, file, hash } = diffCtx;
+  const title = `Blame · ${file}`;
+  $("diffview-title").textContent = title;
+  $("diff-minimap").innerHTML = "";
+  $("diffview-body").innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  showDiffView(true);
+  let lines: { hash: string; author: string; time: number; summary: string; content: string }[];
+  try {
+    lines = await invoke("blame", { path, hash: hash ?? "", file });
+  } catch (e) {
+    $("diffview-body").innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+    return;
+  }
+  const body = $("diffview-body");
+  body.innerHTML = lines
+    .map((bl, i) => {
+      const newGroup = i === 0 || lines[i - 1].hash !== bl.hash;
+      const meta = newGroup
+        ? `${bl.hash.slice(0, 8)}  ${bl.author}  ${fmtDate(bl.time)}`
+        : "";
+      // lines from the viewed commit (or uncommitted lines for WIP) = changes
+      const isChange = hash ? bl.hash === hash : /^0+$/.test(bl.hash);
+      return (
+        `<div class="bl${newGroup ? " bl-top" : ""}${isChange ? " bl-added" : ""}" data-hash="${bl.hash}" title="${escapeHtml(bl.summary)}">` +
+        `<span class="bl-ind"></span>` +
+        `<span class="bl-meta">${escapeHtml(meta)}</span>` +
+        `<span class="ln">${i + 1}</span>` +
+        `<span class="dc">${escapeHtml(bl.content)}</span></div>`
+      );
+    })
+    .join("");
+  body.querySelectorAll<HTMLElement>(".bl").forEach((el) => {
+    el.addEventListener("click", () => {
+      const t = cur();
+      const node = t ? findById(t, el.dataset.hash!) : null;
+      if (node) selectNode(node, true);
+    });
+  });
+}
+
 // show the WHOLE file (content at the commit / working tree), with line numbers
 async function openFileContent(path: string, hash: string | null, file: string) {
+  diffCtx = { path, file, hash };
+  lastView = () => openFileContent(path, hash, file);
+  setBlameBtn(false);
   const rev = hash ?? "";
   const title = `${file} @ ${hash ? hash.slice(0, 8) : "working"}`;
   if (isImage(file)) {
@@ -1508,10 +1643,11 @@ async function openRepo() {
   await loadRepo(picked);
 }
 
-async function loadRepo(path: string, silent = false) {
+async function loadRepo(path: string, silent = false, parentPath?: string) {
   // already open? just focus it.
   const existing = tabs.findIndex((t) => t.repo.path === path);
   if (existing !== -1) {
+    if (parentPath) tabs[existing].parentPath = parentPath;
     switchTab(existing);
     return;
   }
@@ -1524,6 +1660,7 @@ async function loadRepo(path: string, silent = false) {
       nodes: buildNodes(repo),
       placed: [],
       hidden: new Set(),
+      parentPath,
     };
     tabs.push(tab);
     active = tabs.length - 1;
@@ -1983,12 +2120,24 @@ function isImage(file: string): boolean {
   return /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/i.test(file);
 }
 
+let diffCtx: { path: string; file: string; hash: string | null } | null = null;
+let lastView: (() => void) | null = null; // re-render the view before blame
+let blameOn = false;
+function setBlameBtn(on: boolean) {
+  blameOn = on;
+  const b = document.getElementById("diffview-blame");
+  if (b) b.textContent = on ? "✕ Blame" : "Blame";
+}
+
 async function openDiff(
   title: string,
   path: string,
   file: string,
   hash: string | null
 ) {
+  diffCtx = { path, file, hash };
+  lastView = () => openDiff(title, path, file, hash);
+  setBlameBtn(false);
   if (isImage(file)) {
     await showImageDiff(title, path, file, hash);
     return;
@@ -2091,6 +2240,9 @@ async function compareCommitToWorking(path: string, hash: string) {
 
 // one file's diff between a commit and the working tree
 async function openCompareDiff(path: string, hash: string, file: string) {
+  diffCtx = { path, file, hash };
+  lastView = () => openCompareDiff(path, hash, file);
+  setBlameBtn(false);
   const title = `${file} — ${hash.slice(0, 8)} ↔ working`;
   if (isImage(file)) {
     await showImageRevs(title, path, file, hash, ""); // old=commit, new=working
@@ -2221,6 +2373,22 @@ async function reloadGraphOnly() {
     }).catch(() => t.fingerprint);
   } catch (e) {
     console.warn("graph reload failed", String(e));
+  }
+}
+
+// quietly fetch in the background so pushes from elsewhere show up; the
+// fingerprint poll then detects the updated remote refs and reloads.
+let autoFetching = false;
+async function autoFetch() {
+  const t = cur();
+  if (!t || autoFetching || isBusy() || t.repo.conflict.active) return;
+  autoFetching = true;
+  try {
+    await invoke("fetch", { path: t.repo.path });
+  } catch {
+    /* offline / no remote / auth — ignore */
+  } finally {
+    autoFetching = false;
   }
 }
 
@@ -2862,6 +3030,7 @@ const ICONS: Record<string, string> = {
   tag: `<path d="M2.6 7.6V3.1a.5.5 0 0 1 .5-.5h4.5l5.3 5.3a1 1 0 0 1 0 1.4l-3.1 3.1a1 1 0 0 1-1.4 0z"/><circle cx="5" cy="5" r=".7"/>`,
   stash: `<rect x="2.5" y="4" width="11" height="8" rx="1"/><path d="M2.5 8h3l1 1.4h3L13.5 8"/>`,
   eye: `<path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>`,
+  submodule: `<rect x="2" y="2" width="5.5" height="5.5" rx="1"/><rect x="8.5" y="2" width="5.5" height="5.5" rx="1"/><rect x="5.2" y="8.5" width="5.5" height="5.5" rx="1"/>`,
   eyeoff: `<path d="M2 2l12 12"/><path d="M6.7 6.7a2 2 0 0 0 2.6 2.6"/><path d="M9.8 3.6A6 6 0 0 1 14.5 8a12 12 0 0 1-1.4 1.9"/><path d="M3.9 3.9A11 11 0 0 0 1.5 8S4 12.5 8 12.5a6 6 0 0 0 2.3-.45"/>`,
 };
 function icon(kind: string): string {
@@ -3022,6 +3191,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  $("diffview-blame").addEventListener("click", () => {
+    if (blameOn) lastView?.(); // back to the diff/content view
+    else showBlame();
+  });
+  $("diffview-history").addEventListener("click", showFileHistory);
   // sync-scroll the 3 merge-resolver panes so lines stay aligned
   linkScroll(["mv-ours-code", "mv-theirs-code", "mv-result", "mv-output"]);
   setupSplitter("split-left", "sidebar", "left");
@@ -3080,7 +3254,8 @@ window.addEventListener("DOMContentLoaded", () => {
     .catch(() => {});
   renderTabs();
   restoreSession();
-  setInterval(pollActive, 1500); // auto-refresh on file/repo changes
+  setInterval(pollActive, 1500); // local changes (files/stage/commits/branches)
+  setInterval(autoFetch, 90000); // remote changes (someone pushed) — quiet fetch
 });
 // clear drag state when any drag ends
 window.addEventListener("dragend", () => {

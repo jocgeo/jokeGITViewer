@@ -56,6 +56,13 @@ pub struct ConflictState {
 }
 
 #[derive(Serialize)]
+pub struct Submodule {
+    name: String,
+    path: String, // relative path inside the repo
+    abs: String,  // absolute path (open as its own repo)
+}
+
+#[derive(Serialize)]
 pub struct RepoData {
     path: String,
     head: String,        // current commit hash (empty if none)
@@ -66,6 +73,33 @@ pub struct RepoData {
     wip: Option<WipStatus>,
     conflict: ConflictState,
     describe: String, // `git describe` — nearest tag (repo "version")
+    submodules: Vec<Submodule>,
+}
+
+fn load_submodules(path: &str) -> Vec<Submodule> {
+    // declared submodules from .gitmodules: "submodule.<name>.path <relpath>"
+    let raw = git(path, &["config", "--file", ".gitmodules", "--get-regexp", "path"])
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut it = line.splitn(2, ' ');
+        let key = it.next().unwrap_or("");
+        let rel = it.next().unwrap_or("").trim().to_string();
+        if rel.is_empty() {
+            continue;
+        }
+        let name = key
+            .strip_prefix("submodule.")
+            .and_then(|k| k.strip_suffix(".path"))
+            .unwrap_or(&rel)
+            .to_string();
+        out.push(Submodule {
+            name,
+            abs: format!("{path}/{rel}"),
+            path: rel,
+        });
+    }
+    out
 }
 
 // Unit + record separators used in git --pretty format.
@@ -429,6 +463,7 @@ async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String>
     let describe = git(&path, &["describe", "--tags", "--always", "--dirty"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
+    let submodules = load_submodules(&path);
 
     Ok(RepoData {
         path,
@@ -440,6 +475,7 @@ async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String>
         wip,
         conflict,
         describe,
+        submodules,
     })
 }
 
@@ -1022,6 +1058,121 @@ async fn diff_commit_worktree(path: String, hash: String) -> Result<String, Stri
     git(&path, &["diff", "-U100000", &hash])
 }
 
+#[derive(Serialize)]
+pub struct BlameLine {
+    hash: String,
+    author: String,
+    time: i64,
+    summary: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+pub struct HistEntry {
+    hash: String,
+    author: String,
+    time: i64,
+    summary: String,
+    added: i64,   // lines added to this file in this commit (-1 binary)
+    deleted: i64,
+}
+
+// commits that touched a single file (follows renames), with +/- line counts
+#[tauri::command]
+async fn file_history(path: String, file: String) -> Result<Vec<HistEntry>, String> {
+    // commit lines start with US; numstat lines are "added\tdeleted\tpath"
+    let fmt = format!("{US}%H{US}%an{US}%ct{US}%s");
+    let raw = git(
+        &path,
+        &[
+            "log",
+            "--follow",
+            "--numstat",
+            &format!("--pretty=format:{fmt}"),
+            "--",
+            &file,
+        ],
+    )?;
+    let mut out: Vec<HistEntry> = Vec::new();
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix(US) {
+            let f: Vec<&str> = rest.split(US).collect();
+            if f.len() < 4 {
+                continue;
+            }
+            out.push(HistEntry {
+                hash: f[0].to_string(),
+                author: f[1].to_string(),
+                time: f[2].trim().parse().unwrap_or(0),
+                summary: f[3].to_string(),
+                added: 0,
+                deleted: 0,
+            });
+        } else if line.contains('\t') {
+            if let Some(e) = out.last_mut() {
+                let mut it = line.split('\t');
+                e.added = it.next().unwrap_or("").parse().unwrap_or(-1);
+                e.deleted = it.next().unwrap_or("").parse().unwrap_or(-1);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// per-line blame for a file (at a commit, or working tree if hash empty)
+#[tauri::command]
+async fn blame(path: String, hash: String, file: String) -> Result<Vec<BlameLine>, String> {
+    let mut args = vec!["blame", "--porcelain"];
+    if !hash.is_empty() {
+        args.push(&hash);
+    }
+    args.push("--");
+    args.push(&file);
+    let raw = git(&path, &args)?;
+
+    use std::collections::HashMap;
+    let mut meta: HashMap<String, (String, i64, String)> = HashMap::new();
+    let mut out = Vec::new();
+    let mut sha = String::new();
+    let (mut a, mut t, mut s) = (String::new(), 0i64, String::new());
+
+    for line in raw.lines() {
+        if let Some(content) = line.strip_prefix('\t') {
+            meta.entry(sha.clone())
+                .or_insert_with(|| (a.clone(), t, s.clone()));
+            let m = meta.get(&sha).unwrap();
+            out.push(BlameLine {
+                hash: sha.clone(),
+                author: m.0.clone(),
+                time: m.1,
+                summary: m.2.clone(),
+                content: content.to_string(),
+            });
+        } else if let Some(r) = line.strip_prefix("author ") {
+            a = r.to_string();
+        } else if let Some(r) = line.strip_prefix("author-time ") {
+            t = r.trim().parse().unwrap_or(0);
+        } else if let Some(r) = line.strip_prefix("summary ") {
+            s = r.to_string();
+        } else {
+            let first = line.split(' ').next().unwrap_or("");
+            if first.len() >= 20 && first.chars().all(|c| c.is_ascii_hexdigit()) {
+                sha = first.to_string();
+                if let Some(m) = meta.get(&sha) {
+                    a = m.0.clone();
+                    t = m.1;
+                    s = m.2.clone();
+                } else {
+                    a.clear();
+                    t = 0;
+                    s.clear();
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 // full contents of a file at a commit (or the working tree if hash empty)
 #[tauri::command]
 async fn file_at_commit(path: String, hash: String, file: String) -> Result<String, String> {
@@ -1162,7 +1313,9 @@ pub fn run() {
             open_in_vscode,
             commit_tree,
             commit_numstat,
-            file_at_commit
+            file_at_commit,
+            blame,
+            file_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
