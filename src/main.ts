@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 // ---- types mirrored from the Rust backend ----
 interface Commit {
@@ -514,7 +516,47 @@ function isNewerVersion(a: string, b: string): boolean {
 }
 
 // check GitHub for a newer release; show a banner with a download link
+// Try the Tauri auto-updater (in-app download + install). If it's not set up
+// yet (no signing key / no latest.json), fall back to the manual banner.
 async function checkForUpdate() {
+  try {
+    const update = await check();
+    if (!update) return; // up to date
+    const b = $("update-banner");
+    b.innerHTML =
+      `<span>🔔 jokeGITViewer <b>v${escapeHtml(update.version)}</b> is available — you have v${escapeHtml(appVersion)}</span>` +
+      `<span class="ub-btns"><button id="ub-install">Update &amp; restart</button><button id="ub-dismiss" title="Dismiss">✕</button></span>`;
+    b.classList.remove("hidden");
+    $("ub-dismiss").addEventListener("click", () => b.classList.add("hidden"));
+    $("ub-install").addEventListener("click", async () => {
+      const btn = $("ub-install") as HTMLButtonElement;
+      btn.disabled = true;
+      try {
+        let total = 0;
+        let got = 0;
+        await update.downloadAndInstall((ev) => {
+          if (ev.event === "Started") total = ev.data.contentLength ?? 0;
+          else if (ev.event === "Progress") {
+            got += ev.data.chunkLength;
+            btn.textContent = total
+              ? `Downloading ${Math.round((got / total) * 100)}%`
+              : "Downloading…";
+          } else if (ev.event === "Finished") btn.textContent = "Restarting…";
+        });
+        await relaunch();
+      } catch (e) {
+        errorModal("Update failed:\n" + String(e));
+        btn.disabled = false;
+        btn.textContent = "Update & restart";
+      }
+    });
+  } catch {
+    // updater not configured / no manifest — fall back to a download link
+    checkUpdateManual();
+  }
+}
+
+async function checkUpdateManual() {
   try {
     const res = await fetch(
       "https://api.github.com/repos/jocgeo/jokeGITViewer/releases/latest",

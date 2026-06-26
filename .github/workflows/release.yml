@@ -68,12 +68,16 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # code-signing key for the auto-updater (set these as repo secrets)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "jokeGITViewer ${{ github.ref_name }}"
           releaseBody: "See the assets below. Installers (.msi/.exe setup, .dmg, .deb) or run the standalone build (portable .exe / .AppImage) — no install needed."
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
 
       # The installers above don't include the raw standalone exe. Attach the
