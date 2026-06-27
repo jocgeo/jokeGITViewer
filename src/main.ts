@@ -433,8 +433,50 @@ function renderTabs() {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, repoMenu(t.repo.path));
     });
+    // drag to reorder
+    chip.draggable = true;
+    chip.addEventListener("dragstart", (e) => {
+      tabDragFrom = i;
+      chip.classList.add("tab-dragging");
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(i));
+      }
+    });
+    chip.addEventListener("dragover", (e) => {
+      if (tabDragFrom === null || tabDragFrom === i) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      chip.classList.add("tab-drop");
+    });
+    chip.addEventListener("dragleave", () => chip.classList.remove("tab-drop"));
+    chip.addEventListener("drop", (e) => {
+      e.preventDefault();
+      chip.classList.remove("tab-drop");
+      if (tabDragFrom !== null && tabDragFrom !== i) moveTab(tabDragFrom, i);
+      tabDragFrom = null;
+    });
+    chip.addEventListener("dragend", () => {
+      tabDragFrom = null;
+      strip
+        .querySelectorAll(".tab-dragging, .tab-drop")
+        .forEach((x) => x.classList.remove("tab-dragging", "tab-drop"));
+    });
     strip.appendChild(chip);
   });
+}
+
+let tabDragFrom: number | null = null;
+
+function moveTab(from: number, to: number) {
+  if (from === to) return;
+  const activeTab = tabs[active];
+  const [moved] = tabs.splice(from, 1);
+  const dest = from < to ? to - 1 : to;
+  tabs.splice(dest, 0, moved);
+  active = tabs.indexOf(activeTab);
+  renderTabs();
+  saveSession();
 }
 
 function switchTab(i: number) {

@@ -258,6 +258,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .tab.active { background: var(--bg3); color: var(--fg); }
 .tab.tab-sub { border-left: 2px solid var(--accent); }
+.tab.tab-dragging { opacity: 0.4; }
+.tab.tab-drop { box-shadow: -2px 0 0 0 var(--accent); }
 .tab .tab-ic { flex: 0 0 auto; display: inline-flex; color: var(--accent); }
 .tab .tab-ic .ic { width: 13px; height: 13px; }
 /* submodule tab: submodule name has priority, parent shrinks/ellipsizes first */
