@@ -27,6 +27,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags, needed for the changelog
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -64,6 +66,31 @@ jobs:
           node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(p));j.version='$V';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
           echo "app version set to $V"
 
+      # release notes = commit subjects since the previous version tag; this
+      # body also lands in latest.json ("notes") so the in-app update banner
+      # can show what changed.
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          prev=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1)
+          if [ -n "$prev" ]; then
+            range="$prev..$GITHUB_REF_NAME"
+            echo "changelog range: $range"
+          else
+            range="$GITHUB_REF_NAME"
+            echo "first release — listing all commits"
+          fi
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "## What's changed"
+            git log "$range" --no-merges --pretty='- %s'
+            echo ""
+            echo "---"
+            echo "Installers (.msi / .exe setup, .dmg, .deb) or the standalone build (portable .exe / .AppImage) — no install needed."
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -74,7 +101,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "jokeGITViewer ${{ github.ref_name }}"
-          releaseBody: "See the assets below. Installers (.msi/.exe setup, .dmg, .deb) or run the standalone build (portable .exe / .AppImage) — no install needed."
+          releaseBody: ${{ steps.changelog.outputs.body }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

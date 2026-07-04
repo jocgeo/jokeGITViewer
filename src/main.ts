@@ -558,6 +558,25 @@ function isNewerVersion(a: string, b: string): boolean {
   return false;
 }
 
+// release notes (markdown-ish) -> compact "what's new" block for the banner
+function releaseNotesHtml(raw: string | null | undefined): string {
+  const text = (raw ?? "").split(/\n-{3,}\s*\n/)[0].trim(); // drop the "---" footer
+  if (!text) return "";
+  const items = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      if (/^#{1,6}\s/.test(l))
+        return `<div class="ubn-h">${escapeHtml(l.replace(/^#{1,6}\s*/, ""))}</div>`;
+      if (/^[-*]\s/.test(l))
+        return `<div class="ubn-li">• ${escapeHtml(l.replace(/^[-*]\s*/, ""))}</div>`;
+      return `<div class="ubn-p">${escapeHtml(l)}</div>`;
+    })
+    .join("");
+  return `<div id="ub-notes">${items}</div>`;
+}
+
 // check GitHub for a newer release; show a banner with a download link
 // Try the Tauri auto-updater (in-app download + install). If it's not set up
 // yet (no signing key / no latest.json), fall back to the manual banner.
@@ -567,8 +586,11 @@ async function checkForUpdate() {
     if (!update) return; // up to date
     const b = $("update-banner");
     b.innerHTML =
+      `<div class="ub-row">` +
       `<span>🔔 jokeGITViewer <b>v${escapeHtml(update.version)}</b> is available — you have v${escapeHtml(appVersion)}</span>` +
-      `<span class="ub-btns"><button id="ub-install">Update &amp; restart</button><button id="ub-dismiss" title="Dismiss">✕</button></span>`;
+      `<span class="ub-btns"><button id="ub-install">Update &amp; restart</button><button id="ub-dismiss" title="Dismiss">✕</button></span>` +
+      `</div>` +
+      releaseNotesHtml(update.body);
     b.classList.remove("hidden");
     $("ub-dismiss").addEventListener("click", () => b.classList.add("hidden"));
     $("ub-install").addEventListener("click", async () => {
@@ -612,8 +634,11 @@ async function checkUpdateManual() {
     if (!tag || !appVersion || !isNewerVersion(tag, appVersion)) return;
     const b = $("update-banner");
     b.innerHTML =
+      `<div class="ub-row">` +
       `<span>🔔 jokeGITViewer <b>v${escapeHtml(tag)}</b> is available — you have v${escapeHtml(appVersion)}</span>` +
-      `<span class="ub-btns"><button id="ub-download">Download</button><button id="ub-dismiss" title="Dismiss">✕</button></span>`;
+      `<span class="ub-btns"><button id="ub-download">Download</button><button id="ub-dismiss" title="Dismiss">✕</button></span>` +
+      `</div>` +
+      releaseNotesHtml(String(data.body ?? ""));
     b.classList.remove("hidden");
     $("ub-download").addEventListener("click", () => openUrl(url).catch(() => {}));
     $("ub-dismiss").addEventListener("click", () => b.classList.add("hidden"));
