@@ -55,6 +55,7 @@ interface RepoData {
   conflict: ConflictState;
   describe: string;
   submodules: { name: string; path: string; abs: string }[];
+  fingerprint: string;
 }
 
 // ---- unified graph node ----
@@ -1501,17 +1502,19 @@ async function loadProject() {
 let fileHistoryHL: Set<string> | null = null;
 let fileHistoryNum: Map<string, { a: number; d: number }> = new Map();
 
+interface HistEntry {
+  hash: string;
+  author: string;
+  time: number;
+  summary: string;
+  added: number;
+  deleted: number;
+}
+
 async function showFileHistory() {
   if (!diffCtx) return;
   const { path, file } = diffCtx;
-  let hist: {
-    hash: string;
-    author: string;
-    time: number;
-    summary: string;
-    added: number;
-    deleted: number;
-  }[];
+  let hist: HistEntry[];
   try {
     hist = await invoke("file_history", { path, file });
   } catch (e) {
@@ -1524,10 +1527,44 @@ async function showFileHistory() {
   showDiffView(false);
   const t = cur();
   if (t) renderGraph(t);
-  const b = $("hist-filter");
-  b.innerHTML = `<span>📄 History: <b>${escapeHtml(file)}</b> — ${hist.length} commit(s) highlighted</span><button id="hist-clear" title="Clear">✕</button>`;
-  b.classList.remove("hidden");
-  $("hist-clear").addEventListener("click", clearFileHistory);
+  renderHistPanel(file, hist);
+}
+
+// left-of-graph column listing every commit that touched the file; clicking
+// one jumps the graph to that commit and selects it
+function renderHistPanel(file: string, hist: HistEntry[]) {
+  $("hist-title").innerHTML =
+    `📄 <b>${escapeHtml(basename(file))}</b> · ${hist.length}`;
+  ($("hist-title") as HTMLElement).title = file;
+  const ul = $("hist-list");
+  ul.innerHTML = "";
+  if (!hist.length) ul.innerHTML = "<li class='muted'>(no commits)</li>";
+  hist.forEach((h) => {
+    const li = document.createElement("li");
+    li.className = "hist-item";
+    const ns =
+      h.added < 0 || h.deleted < 0
+        ? `<span class="ns-bin">bin</span>`
+        : `<span class="ns-add">+${h.added}</span><span class="ns-del">−${h.deleted}</span>`;
+    li.innerHTML =
+      `<div class="hi-top"><span class="hi-msg">${escapeHtml(h.summary)}</span>` +
+      `<span class="numstat">${ns}</span></div>` +
+      `<div class="hi-meta"><span class="hi-hash">${h.hash.slice(0, 8)}</span>` +
+      `<span class="hi-author">${escapeHtml(h.author)}</span>` +
+      `<span class="hi-date">${fmtDate(h.time)}</span></div>`;
+    li.title = `${h.hash}\n${h.author} — ${fmtDate(h.time)}\n${h.summary}`;
+    li.addEventListener("click", () => {
+      const t = cur();
+      if (!t) return;
+      ul.querySelectorAll("li.selected").forEach((x) => x.classList.remove("selected"));
+      li.classList.add("selected");
+      const n = t.nodes.find((x) => x.id === h.hash);
+      if (n) selectNode(n, true); // select + scroll the graph to the commit
+      else setStatus(`commit ${h.hash.slice(0, 8)} not in the loaded graph`);
+    });
+    ul.appendChild(li);
+  });
+  $("hist-panel").classList.remove("hidden");
 }
 
 function fileHistNumBadge(hash: string): string {
@@ -1543,6 +1580,7 @@ function clearFileHistory() {
   fileHistoryHL = null;
   fileHistoryNum = new Map();
   $("hist-filter").classList.add("hidden");
+  $("hist-panel").classList.add("hidden");
   const t = cur();
   if (t) renderGraph(t);
 }
@@ -1745,6 +1783,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
       placed: [],
       hidden: new Set(),
       parentPath,
+      fingerprint: repo.fingerprint,
     };
     tabs.push(tab);
     active = tabs.length - 1;
@@ -1833,6 +1872,7 @@ async function restoreSession() {
           nodes: buildNodes(repo),
           placed: [],
           hidden: new Set(),
+          fingerprint: repo.fingerprint,
         }
       : (null as unknown as Tab);
   }
@@ -1916,7 +1956,8 @@ async function refreshCommitFiles() {
           .querySelectorAll("#c-unstaged li.selected, #c-staged li.selected")
           .forEach((x) => x.classList.remove("selected"));
         li.classList.add("selected");
-        openDiff(f.path, path, f.path, null);
+        // one-sided diff with per-line stage/unstage buttons
+        openWipDiff(path, f.path, !stage);
       });
       li.querySelector(".stagebtn")?.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2241,6 +2282,178 @@ async function openDiff(
   }
 }
 
+// ---- line-level staging ----
+// The WIP file lists open this view instead of openDiff(): it shows only one
+// side (unstaged: index→worktree, staged: HEAD→index) and puts a clickable
+// +/− button on every changed line to stage/unstage just that line.
+let wipDiffCtx: { path: string; file: string; staged: boolean; diff: string } | null = null;
+
+async function openWipDiff(path: string, file: string, staged: boolean) {
+  diffCtx = { path, file, hash: null };
+  lastView = () => openWipDiff(path, file, staged);
+  setBlameBtn(false);
+  wipDiffCtx = null;
+  if (isImage(file)) {
+    await showImageDiff(file, path, file, null);
+    return;
+  }
+  const title = `${file} — ${staged ? "staged" : "unstaged"} changes`;
+  $("diffview-title").textContent = title;
+  const body = $("diffview-body");
+  body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  showDiffView(true);
+  try {
+    const diff = await invoke<string>("wip_diff_split", { path, file, staged });
+    wipDiffCtx = { path, file, staged, diff };
+    showDiffText(title, diff);
+    decorateStageableRows(staged);
+  } catch (e) {
+    body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+    $("diff-minimap").innerHTML = "";
+  }
+}
+
+// add a stage/unstage button to every changed row of the rendered diff
+function decorateStageableRows(staged: boolean) {
+  const body = $("diffview-body");
+  body.querySelectorAll<HTMLElement>(".dl.add, .dl.del").forEach((row) => {
+    const kind = row.classList.contains("add") ? "add" : "del";
+    // add rows carry their new-side line number, del rows their old-side one
+    const lns = row.querySelectorAll(".ln");
+    const ln = parseInt((kind === "add" ? lns[1] : lns[0])?.textContent ?? "", 10);
+    if (!Number.isFinite(ln)) return;
+    row.classList.add("stg");
+    const btn = document.createElement("span");
+    btn.className = "stg-btn";
+    btn.textContent = staged ? "−" : "+";
+    btn.title = staged ? "Unstage this line" : "Stage this line";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      stageSingleLine(kind as "add" | "del", ln);
+    });
+    row.insertBefore(btn, row.firstChild);
+  });
+}
+
+// Build a minimal patch that stages/unstages ONLY the selected changed line.
+// Stage    (index→worktree diff): other + lines dropped, other − lines → context.
+// Unstage  (HEAD→index diff, applied in reverse): other + lines → context,
+//          other − lines dropped — so the patch's "new" side matches the index.
+function buildLinePatch(
+  diff: string,
+  sel: { kind: "add" | "del"; ln: number },
+  forUnstage: boolean
+): { patch: string; newFile: boolean } | null {
+  const lines = diff.split("\n");
+  let minus = "";
+  let plus = "";
+  let newFile = false;
+  let oldN = 0;
+  let newN = 0;
+  let hunkOldStart = 0;
+  let hunkNewStart = 0;
+  let cur: string[] = [];
+  let oldCnt = 0;
+  let newCnt = 0;
+  let hasSel = false;
+  let done: string | null = null;
+
+  const finishHunk = (): string | null => {
+    if (!hasSel || !cur.length) return null;
+    const ns = forUnstage ? hunkNewStart : Math.max(hunkOldStart, 1);
+    return (
+      `@@ -${hunkOldStart},${oldCnt} +${ns},${newCnt} @@\n` + cur.join("\n") + "\n"
+    );
+  };
+
+  for (const line of lines) {
+    if (line === "") continue;
+    if (line.startsWith("--- ")) {
+      minus = line;
+      if (line.includes("/dev/null")) newFile = true;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      plus = line;
+      continue;
+    }
+    if (line.startsWith("@@")) {
+      done = done ?? finishHunk();
+      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (!m) continue;
+      oldN = +m[1];
+      newN = +m[2];
+      hunkOldStart = oldN;
+      hunkNewStart = newN;
+      cur = [];
+      oldCnt = 0;
+      newCnt = 0;
+      hasSel = false;
+      continue;
+    }
+    if (!minus || done) continue; // header noise / already built
+    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (line.startsWith("+")) {
+      const isSel = sel.kind === "add" && newN === sel.ln;
+      newN++;
+      if (isSel) {
+        cur.push(line);
+        newCnt++;
+        hasSel = true;
+      } else if (forUnstage) {
+        cur.push(" " + line.slice(1)); // stays in the index → context
+        oldCnt++;
+        newCnt++;
+      } // else: dropped — not being staged
+      continue;
+    }
+    if (line.startsWith("-")) {
+      const isSel = sel.kind === "del" && oldN === sel.ln;
+      oldN++;
+      if (isSel) {
+        cur.push(line);
+        oldCnt++;
+        hasSel = true;
+      } else if (!forUnstage) {
+        cur.push(" " + line.slice(1)); // deletion not staged → line stays
+        oldCnt++;
+        newCnt++;
+      } // else: dropped — never made it into the index
+      continue;
+    }
+    cur.push(line); // plain context
+    oldCnt++;
+    newCnt++;
+    oldN++;
+    newN++;
+  }
+  done = done ?? finishHunk();
+  if (!done || !minus || !plus) return null;
+  return { patch: `${minus}\n${plus}\n${done}`, newFile };
+}
+
+async function stageSingleLine(kind: "add" | "del", ln: number) {
+  const c = wipDiffCtx;
+  if (!c) return;
+  const built = buildLinePatch(c.diff, { kind, ln }, c.staged);
+  if (!built) return;
+  try {
+    await invoke("stage_lines_patch", {
+      path: c.path,
+      patch: built.patch,
+      reverse: c.staged,
+      intentFile: built.newFile && !c.staged ? c.file : null,
+    });
+    const scroll = $("diffview-body").scrollTop; // keep the reading position
+    await refreshCommitFiles();
+    await reloadGraphOnly();
+    await openWipDiff(c.path, c.file, c.staged); // re-render with fresh numbers
+    $("diffview-body").scrollTop = scroll;
+  } catch (e) {
+    errorModal((c.staged ? "Unstage" : "Stage") + " line failed:\n" + String(e));
+  }
+}
+
 // show an image change as before/after previews
 async function showImageDiff(
   title: string,
@@ -2452,9 +2665,7 @@ async function reloadGraphOnly() {
     renderSidebar(t);
     renderGraph(t);
     saveRepoCache(t.repo.path, repo);
-    t.fingerprint = await invoke<string>("repo_fingerprint", {
-      path: t.repo.path,
-    }).catch(() => t.fingerprint);
+    t.fingerprint = repo.fingerprint; // included in open_repo — no extra call
   } catch (e) {
     console.warn("graph reload failed", String(e));
   }
@@ -2555,9 +2766,7 @@ async function reloadActive(statusMsg?: string) {
       t.selected = repo.head || (repo.wip ? WIP_ID : null);
     }
     saveRepoCache(t.repo.path, repo);
-    t.fingerprint = await invoke<string>("repo_fingerprint", {
-      path: t.repo.path,
-    }).catch(() => t.fingerprint);
+    t.fingerprint = repo.fingerprint; // included in open_repo — no extra call
     renderActive();
     if (statusMsg) setStatus(statusMsg);
     refreshRemoteTags(t);
@@ -3280,6 +3489,7 @@ window.addEventListener("DOMContentLoaded", () => {
     else showBlame();
   });
   $("diffview-history").addEventListener("click", showFileHistory);
+  $("hist-close").addEventListener("click", clearFileHistory);
   // sync-scroll the 3 merge-resolver panes so lines stay aligned
   linkScroll(["mv-ours-code", "mv-theirs-code", "mv-result", "mv-output"]);
   setupSplitter("split-left", "sidebar", "left");

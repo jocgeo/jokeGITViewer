@@ -74,6 +74,7 @@ pub struct RepoData {
     conflict: ConflictState,
     describe: String, // `git describe` — nearest tag (repo "version")
     submodules: Vec<Submodule>,
+    fingerprint: String, // same value repo_fingerprint returns — saves a round-trip
 }
 
 fn load_submodules(path: &str) -> Vec<Submodule> {
@@ -126,6 +127,47 @@ fn git(repo: &str, args: &[&str]) -> Result<String, String> {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();
         // some git messages are printed to stdout, not stderr
+        let msg = if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err.to_string()
+        };
+        return Err(format!("git {:?} failed: {msg}", args));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// like git(), but pipes `input` to git's stdin (e.g. `apply --cached -`)
+fn git_stdin(repo: &str, args: &[&str], input: &str) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(args)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("failed to run git: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(input.as_bytes())
+        .map_err(|e| e.to_string())?; // stdin drops here -> pipe closes
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
         let msg = if err.is_empty() {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         } else {
@@ -382,37 +424,28 @@ fn load_commits(repo: &str, limit: u32) -> Result<Vec<Commit>, String> {
 }
 
 fn load_stashes(repo: &str) -> Result<Vec<StashEntry>, String> {
-    let fmt = format!("%gd{US}%H{US}%ct{US}%gs");
+    // %P gives the parents directly — no extra `rev-list` process per stash
+    let fmt = format!("%gd{US}%H{US}%P{US}%ct{US}%gs");
     let raw = git(repo, &["stash", "list", &format!("--format={fmt}")])?;
     let mut out = Vec::new();
     for line in raw.lines() {
         let f: Vec<&str> = line.split(US).collect();
-        if f.len() < 4 {
+        if f.len() < 5 {
             continue;
         }
-        let hash = f[1].to_string();
-        // rev-list --parents prints: "<hash> <p1> <p2> ..."
-        let parents = git(repo, &["rev-list", "--parents", "-n", "1", &hash])
-            .map(|s| {
-                s.split_whitespace()
-                    .skip(1)
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         out.push(StashEntry {
             selector: f[0].to_string(),
-            hash,
-            parents,
-            time: f[2].trim().parse().unwrap_or(0),
-            message: f[3].to_string(),
+            hash: f[1].to_string(),
+            parents: f[2].split_whitespace().map(|x| x.to_string()).collect(),
+            time: f[3].trim().parse().unwrap_or(0),
+            message: f[4].to_string(),
         });
     }
     Ok(out)
 }
 
-fn load_wip(repo: &str, head: &str) -> Option<WipStatus> {
-    let raw = git(repo, &["status", "--porcelain", "--untracked-files=all"]).ok()?;
+// build WIP counters from already-fetched `status --porcelain` output
+fn wip_from_status(raw: &str, head: &str) -> Option<WipStatus> {
     let (mut staged, mut unstaged, mut untracked) = (0u32, 0u32, 0u32);
     for line in raw.lines() {
         if line.len() < 2 {
@@ -443,39 +476,93 @@ fn load_wip(repo: &str, head: &str) -> Option<WipStatus> {
     })
 }
 
+// raw inputs for the repo fingerprint (shared by open_repo + repo_fingerprint
+// so both produce byte-identical strings and the poll never false-triggers)
+fn fingerprint_refs(repo: &str) -> String {
+    git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )
+    .unwrap_or_default()
+}
+fn fingerprint_stash(repo: &str) -> String {
+    git(repo, &["rev-parse", "--quiet", "--verify", "refs/stash"]).unwrap_or_default()
+}
+
 #[tauri::command]
 async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String> {
     if !is_repo(&path) {
         return Err(format!("not a git repository: {path}"));
     }
-    let head = git(&path, &["rev-parse", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let head_branch = git(&path, &["symbolic-ref", "--short", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let p = path.as_str();
+    let lim = limit.unwrap_or(2000);
 
-    let refs = load_refs(&path)?;
-    let commits = load_commits(&path, limit.unwrap_or(2000))?;
-    let stashes = load_stashes(&path).unwrap_or_default();
-    let wip = load_wip(&path, &head);
-    let conflict = load_conflict(&path);
-    let describe = git(&path, &["describe", "--tags", "--always", "--dirty"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let submodules = load_submodules(&path);
+    // All these git calls are independent read-only queries — run them
+    // concurrently so total wall time ≈ the slowest single call (usually
+    // `status` or `log`) instead of the sum of ~10 sequential process spawns.
+    let (head, head_branch, refs, commits, stashes, status_raw, conflict, describe, submodules, fp_refs, fp_stash) =
+        std::thread::scope(|s| {
+            let head = s.spawn(move || {
+                git(p, &["rev-parse", "HEAD"])
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            });
+            let head_branch = s.spawn(move || {
+                git(p, &["symbolic-ref", "--short", "HEAD"])
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            });
+            let refs = s.spawn(move || load_refs(p));
+            let commits = s.spawn(move || load_commits(p, lim));
+            let stashes = s.spawn(move || load_stashes(p).unwrap_or_default());
+            let status_raw = s.spawn(move || {
+                git(p, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default()
+            });
+            let conflict = s.spawn(move || load_conflict(p));
+            let describe = s.spawn(move || {
+                git(p, &["describe", "--tags", "--always", "--dirty"])
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default()
+            });
+            let submodules = s.spawn(move || load_submodules(p));
+            let fp_refs = s.spawn(move || fingerprint_refs(p));
+            let fp_stash = s.spawn(move || fingerprint_stash(p));
+            (
+                head.join().unwrap(),
+                head_branch.join().unwrap(),
+                refs.join().unwrap(),
+                commits.join().unwrap(),
+                stashes.join().unwrap(),
+                status_raw.join().unwrap(),
+                conflict.join().unwrap(),
+                describe.join().unwrap(),
+                submodules.join().unwrap(),
+                fp_refs.join().unwrap(),
+                fp_stash.join().unwrap(),
+            )
+        });
+
+    let wip = wip_from_status(&status_raw, &head);
+    let fingerprint = format!("{}\n{}\n{}\n{}", head, status_raw, fp_refs, fp_stash.trim());
 
     Ok(RepoData {
         path,
         head,
         head_branch,
-        refs,
-        commits,
+        refs: refs?,
+        commits: commits?,
         stashes,
         wip,
         conflict,
         describe,
         submodules,
+        fingerprint,
     })
 }
 
@@ -709,6 +796,31 @@ async fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
     Ok(files)
 }
 
+// synthesize a diff for an untracked file where every line is an addition so
+// the UI renders it with line numbers + green highlighting
+fn synth_untracked_diff(path: &str, file: &str) -> Result<String, String> {
+    let full = format!("{path}/{file}");
+    if Path::new(&full).is_dir() {
+        return Ok(format!("(untracked directory: {file})"));
+    }
+    let raw = std::fs::read(&full).map_err(|e| e.to_string())?;
+    // binary (incl. images) -> don't try to render as text
+    let content = match String::from_utf8(raw) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(format!("(binary file — {} bytes)", e.into_bytes().len()));
+        }
+    };
+    let n = content.lines().count().max(1);
+    let mut out = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{n} @@\n");
+    for line in content.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 async fn wip_diff(path: String, file: String) -> Result<String, String> {
     // All uncommitted changes for this file vs HEAD (staged + unstaged).
@@ -718,29 +830,45 @@ async fn wip_diff(path: String, file: String) -> Result<String, String> {
         // -U100000 => whole file shown with full context
         git(&path, &["diff", "-U100000", "HEAD", "--", &file])
     } else {
-        // untracked: synthesize a diff where every line is an addition so the
-        // UI renders it with line numbers + green highlighting
-        let full = format!("{path}/{file}");
-        if Path::new(&full).is_dir() {
-            return Ok(format!("(untracked directory: {file})"));
-        }
-        let raw = std::fs::read(&full).map_err(|e| e.to_string())?;
-        // binary (incl. images) -> don't try to render as text
-        let content = match String::from_utf8(raw) {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(format!("(binary file — {} bytes)", e.into_bytes().len()));
-            }
-        };
-        let n = content.lines().count().max(1);
-        let mut out = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{n} @@\n");
-        for line in content.lines() {
-            out.push('+');
-            out.push_str(line);
-            out.push('\n');
-        }
-        Ok(out)
+        synth_untracked_diff(&path, &file)
     }
+}
+
+// One side of the WIP only — the diffs line-level staging operates on.
+//   staged=false: index -> worktree (what `git add` would stage)
+//   staged=true:  HEAD  -> index   (what `git reset` would unstage)
+#[tauri::command]
+async fn wip_diff_split(path: String, file: String, staged: bool) -> Result<String, String> {
+    if staged {
+        return git(&path, &["diff", "--cached", "-U100000", "--", &file]);
+    }
+    let tracked = git(&path, &["ls-files", "--error-unmatch", "--", &file]).is_ok();
+    if tracked {
+        git(&path, &["diff", "-U100000", "--", &file])
+    } else {
+        synth_untracked_diff(&path, &file)
+    }
+}
+
+// Apply a minimal patch to the index only (working tree untouched) — this is
+// how single lines get staged (reverse=false) or unstaged (reverse=true).
+// `intent_file` is set for untracked files: `add -N` creates an empty index
+// entry first so `apply --cached` has something to patch.
+#[tauri::command]
+async fn stage_lines_patch(
+    path: String,
+    patch: String,
+    reverse: bool,
+    intent_file: Option<String>,
+) -> Result<(), String> {
+    if let Some(f) = intent_file {
+        let _ = git(&path, &["add", "--intent-to-add", "--", &f]);
+    }
+    let mut args = vec!["apply", "--cached", "--whitespace=nowarn"];
+    if reverse {
+        args.push("--reverse");
+    }
+    git_stdin(&path, &args, &patch).map(|_| ())
 }
 
 // Checkout a branch / tag / commit. If the working tree is dirty, stash first
@@ -786,21 +914,22 @@ async fn checkout(path: String, target: String, upstream: Option<String>) -> Res
 // this and only reloads the graph when it differs.
 #[tauri::command]
 async fn repo_fingerprint(path: String) -> Result<String, String> {
-    let head = git(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
-    let status = git(&path, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default();
-    let refs = git(
-        &path,
-        &[
-            "for-each-ref",
-            "--format=%(objectname) %(refname)",
-            "refs/heads",
-            "refs/remotes",
-            "refs/tags",
-        ],
-    )
-    .unwrap_or_default();
-    let stash = git(&path, &["rev-parse", "--quiet", "--verify", "refs/stash"])
-        .unwrap_or_default();
+    let p = path.as_str();
+    // polled every 1.5s — run the four probes concurrently
+    let (head, status, refs, stash) = std::thread::scope(|s| {
+        let head = s.spawn(move || git(p, &["rev-parse", "HEAD"]).unwrap_or_default());
+        let status = s.spawn(move || {
+            git(p, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default()
+        });
+        let refs = s.spawn(move || fingerprint_refs(p));
+        let stash = s.spawn(move || fingerprint_stash(p));
+        (
+            head.join().unwrap(),
+            status.join().unwrap(),
+            refs.join().unwrap(),
+            stash.join().unwrap(),
+        )
+    });
     Ok(format!(
         "{}\n{}\n{}\n{}",
         head.trim(),
@@ -873,12 +1002,16 @@ async fn create_branch_checkout(path: String, name: String) -> Result<(), String
 async fn open_terminal(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // open a new cmd window at the repo directory (cd /d needs backslashes)
+        // Open a new cmd window AT the repo directory. Don't pass the path on
+        // the command line at all (`start` eats a quoted arg as window title —
+        // paths with spaces then silently cd nowhere); instead launch with the
+        // repo as working directory — the new console inherits it.
         let win_path = path.replace('/', "\\");
-        Command::new("cmd")
-            .args(["/C", "start", "cmd", "/K", &format!("cd /d \"{win_path}\"")])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", "cmd"]).current_dir(&win_path);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW for the launcher
+        cmd.spawn().map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
     {
@@ -1269,6 +1402,8 @@ pub fn run() {
             commit_diff,
             wip_files,
             wip_diff,
+            wip_diff_split,
+            stage_lines_patch,
             wip_status,
             stage_file,
             unstage_file,
