@@ -850,6 +850,130 @@ async fn wip_diff_split(path: String, file: String, staged: bool) -> Result<Stri
     }
 }
 
+// Cherry-pick ONE FILE's changes from a commit into the working tree.
+// Applies that commit's diff for the file with a 3-way merge, so it still
+// works when the file has drifted since (conflict markers on real clashes).
+#[tauri::command]
+async fn cherry_pick_file(path: String, hash: String, file: String) -> Result<(), String> {
+    let patch = git(
+        &path,
+        &[
+            "show",
+            "--first-parent",
+            "--format=",
+            "-M",
+            &hash,
+            "--",
+            &file,
+        ],
+    )?;
+    if patch.trim().is_empty() {
+        return Err(format!("commit {hash} has no changes for {file}"));
+    }
+    // plain apply first: worktree-only, works on locally-modified files and
+    // leaves the change unstaged. If the context drifted, retry with a 3-way
+    // merge (needs a clean index for the file; conflict markers on clashes).
+    match git_stdin(&path, &["apply", "--whitespace=nowarn"], &patch) {
+        Ok(_) => Ok(()),
+        Err(_) => git_stdin(&path, &["apply", "--3way", "--whitespace=nowarn"], &patch)
+            .map(|_| ()),
+    }
+}
+
+// Move one line to another position (drag-and-drop correction after a line
+// pick landed in the wrong place). `from` = current 0-based index, `to` =
+// insertion index in the ORIGINAL line array (before removal).
+#[tauri::command]
+async fn move_line(path: String, file: String, from: usize, to: usize) -> Result<(), String> {
+    let full = format!("{path}/{file}");
+    let raw = std::fs::read_to_string(&full).map_err(|e| e.to_string())?;
+    let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    let normalized = raw.replace("\r\n", "\n");
+    let had_trailing = normalized.ends_with('\n');
+    let mut lines: Vec<&str> = normalized.split('\n').collect();
+    if had_trailing {
+        lines.pop(); // artifact of the trailing newline
+    }
+    if from >= lines.len() {
+        return Err("line index out of range — file changed?".to_string());
+    }
+    let line = lines.remove(from);
+    let dest = if to > from { to - 1 } else { to }.min(lines.len());
+    lines.insert(dest, line);
+    let mut out = lines.join(eol);
+    if had_trailing {
+        out.push_str(eol);
+    }
+    std::fs::write(&full, out).map_err(|e| e.to_string())
+}
+
+// current working-tree content of one file (for the cherry-pick split view)
+#[tauri::command]
+async fn file_worktree(path: String, file: String) -> Result<String, String> {
+    let raw = std::fs::read(format!("{path}/{file}")).map_err(|e| e.to_string())?;
+    String::from_utf8(raw).map_err(|_| "binary file".to_string())
+}
+
+// Last-resort line pick: no context anchors the line anywhere in the target
+// file (e.g. picked from the commit that created the file, and the worktree
+// copy shares no neighboring lines) — append it at the end instead.
+#[tauri::command]
+async fn append_line_to_file(path: String, file: String, text: String) -> Result<(), String> {
+    use std::io::Write;
+    let full = format!("{path}/{file}");
+    let existing = std::fs::read(&full).unwrap_or_default();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&full)
+        .map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        out.push('\n');
+    }
+    out.push_str(&text);
+    out.push('\n');
+    f.write_all(out.as_bytes()).map_err(|e| e.to_string())
+}
+
+// Cherry-pick single lines: apply a minimal patch to the working tree only.
+// The patch carries a few context lines; if the surroundings changed too much
+// git rejects it instead of guessing (surfaced as an error to the user).
+// reverse=true undoes a previously applied patch (click-again-to-revert).
+#[tauri::command]
+async fn apply_patch_worktree(
+    path: String,
+    patch: String,
+    reverse: Option<bool>,
+) -> Result<(), String> {
+    let mut args = vec!["apply", "--whitespace=nowarn"];
+    if reverse.unwrap_or(false) {
+        args.push("--reverse");
+    }
+    git_stdin(&path, &args, &patch).map(|_| ())
+}
+
+// undo of the append fallback: drop the last line if it matches `text`
+#[tauri::command]
+async fn remove_last_line_if(path: String, file: String, text: String) -> Result<(), String> {
+    let full = format!("{path}/{file}");
+    let raw = std::fs::read_to_string(&full).map_err(|e| e.to_string())?;
+    let normalized = raw.replace("\r\n", "\n");
+    let mut lines: Vec<&str> = normalized.split('\n').collect();
+    while lines.last() == Some(&"") {
+        lines.pop(); // trailing newline artifacts
+    }
+    if lines.last().map(|l| l.trim_end()) != Some(text.trim_end()) {
+        return Err("last line no longer matches — file changed since the append".to_string());
+    }
+    lines.pop();
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    std::fs::write(&full, out).map_err(|e| e.to_string())
+}
+
 // Apply a minimal patch to the index only (working tree untouched) — this is
 // how single lines get staged (reverse=false) or unstaged (reverse=true).
 // `intent_file` is set for untracked files: `add -N` creates an empty index
@@ -1404,6 +1528,12 @@ pub fn run() {
             wip_diff,
             wip_diff_split,
             stage_lines_patch,
+            cherry_pick_file,
+            apply_patch_worktree,
+            append_line_to_file,
+            remove_last_line_if,
+            move_line,
+            file_worktree,
             wip_status,
             stage_file,
             unstage_file,

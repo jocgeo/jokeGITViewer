@@ -711,6 +711,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .mm.add { background: #3fb950; }
 .mm.del { background: #f85149; }
+.mm.dup { background: #a371f7; }
 
 /* merge resolver (3-pane) */
 #mergeview { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -948,6 +949,77 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .dl.add .stg-btn { background: #2ea043; }
 .dl.del .stg-btn { background: #f85149; }
+/* cherry-pick-line button (commit diff view) — accent blue, not stage green */
+.dl.add .stg-btn.pick-btn,
+.dl.del .stg-btn.pick-btn { background: var(--accent); color: #0a0a12; }
+
+/* interactive cherry-pick split view: working tree | commit file */
+.cpwrap { display: flex; height: 100%; min-height: 0; }
+.cp-pane {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.cp-pane:last-child { border-right: none; }
+.cp-head {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cp-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.cpl { display: flex; }
+.cpl .ln {
+  flex: 0 0 44px;
+  text-align: right;
+  padding-right: 8px;
+  color: var(--muted);
+  user-select: none;
+  opacity: 0.7;
+}
+.cpl .dc { flex: 1 1 auto; padding: 0 10px; white-space: pre; }
+.cpl.add { background: rgba(46, 160, 67, 0.16); cursor: pointer; }
+.cpl.add .dc { color: #b5f0c0; }
+.cpl.del { background: rgba(248, 81, 73, 0.16); cursor: pointer; }
+.cpl.del .dc { color: #ffc0bc; text-decoration: line-through; opacity: 0.85; }
+.cpl.add:hover, .cpl.del:hover { filter: brightness(1.35); }
+.cpl.cp-done { opacity: 0.45; }
+.cpl.cp-done .dc::after { content: "  ✓ applied — click to revert"; color: #3fb950; font-size: 10px; }
+.cpl.cp-done:hover { opacity: 0.8; }
+/* left-pane hover hints */
+.cpl.cp-ins { box-shadow: inset 0 2px 0 0 #3fb950; }
+.cpl.cp-ins-after { box-shadow: inset 0 -2px 0 0 #3fb950; }
+.cpl.cp-del-hit { background: rgba(248, 81, 73, 0.3); }
+/* changed line: this one would be replaced by the picked version */
+.cpl.cp-repl-hit { background: rgba(210, 153, 34, 0.3); box-shadow: inset 0 2px 0 0 #3fb950; }
+/* left-pane: changes already picked in (draggable to fix the placement) */
+.cpl.cp-applied { background: rgba(46, 160, 67, 0.18); cursor: grab; }
+.cpl.cp-applied .dc { color: #b5f0c0; }
+.cpl.cp-applied:active { cursor: grabbing; }
+.cpl.cp-dragging { opacity: 0.35; }
+.cpl.cp-removed { box-shadow: inset 0 2px 0 0 #f85149; }
+/* change already present in the working tree — informational, not pickable */
+.cpl.add.cp-already,
+.cpl.del.cp-already,
+.cpl.cp-already { background: rgba(163, 113, 247, 0.16); cursor: default; }
+.cpl.add.cp-already .dc,
+.cpl.del.cp-already .dc,
+.cpl.cp-already .dc { color: #d2b6f7; text-decoration: none; }
+.cpl.add.cp-already:hover,
+.cpl.del.cp-already:hover { filter: none; }
 .dl.stg:hover .stg-btn { opacity: 1; }
 .stg-btn:hover { filter: brightness(1.25); }
 
