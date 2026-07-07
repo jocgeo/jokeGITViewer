@@ -939,6 +939,103 @@ async fn move_line(path: String, file: String, from: usize, to: usize) -> Result
     std::fs::write(&full, out).map_err(|e| e.to_string())
 }
 
+// ---- git-native repo chat (STRICTLY opt-in — commands only run when the
+// user enabled chat for the repo; nothing here is called otherwise) ----
+// Messages are commits on a hidden ref that never appears as a branch/tag on
+// the remote. Whoever can push the repo can chat; read access = read chat.
+const CHAT_REF: &str = "refs/jkt-chat/main";
+
+#[derive(Serialize)]
+pub struct ChatMsg {
+    hash: String,
+    author: String,
+    email: String,
+    time: i64,
+    text: String,
+}
+
+fn chat_read(path: &str) -> Vec<ChatMsg> {
+    let fmt = format!("%H{US}%an{US}%ae{US}%ct{US}%B{RS}");
+    let raw = match git(
+        path,
+        &["log", "--reverse", &format!("--pretty=format:{fmt}"), CHAT_REF],
+    ) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(), // ref doesn't exist yet -> empty chat
+    };
+    let mut out = Vec::new();
+    for rec in raw.split(RS) {
+        let rec = rec.trim_start_matches('\n');
+        if rec.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = rec.split(US).collect();
+        if f.len() < 5 {
+            continue;
+        }
+        out.push(ChatMsg {
+            hash: f[0].to_string(),
+            author: f[1].to_string(),
+            email: f[2].to_string(),
+            time: f[3].trim().parse().unwrap_or(0),
+            text: f[4].trim_end().to_string(),
+        });
+    }
+    out
+}
+
+// fetch the remote chat ref (force-update, best effort — offline/no ref is
+// fine) and return all messages oldest -> newest
+#[tauri::command]
+async fn chat_pull(path: String) -> Result<Vec<ChatMsg>, String> {
+    let _ = git(&path, &["fetch", "origin", &format!("+{CHAT_REF}:{CHAT_REF}")]);
+    Ok(chat_read(&path))
+}
+
+#[tauri::command]
+async fn chat_send(path: String, text: String) -> Result<Vec<ChatMsg>, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("empty message".to_string());
+    }
+    // the empty tree object (mktree also makes sure it exists in the odb)
+    let tree = git_stdin(&path, &["mktree"], "")?.trim().to_string();
+
+    let mut last_err = String::new();
+    for _ in 0..3 {
+        // sync to the remote tip first; + forces past our own orphaned tries
+        let _ = git(&path, &["fetch", "origin", &format!("+{CHAT_REF}:{CHAT_REF}")]);
+        let parent = git(&path, &["rev-parse", "--verify", "--quiet", CHAT_REF])
+            .map(|s| s.trim().to_string())
+            .ok();
+
+        let mut args: Vec<&str> = vec!["commit-tree", &tree, "-m", &text];
+        if let Some(ref p) = parent {
+            args.push("-p");
+            args.push(p);
+        }
+        let commit = git(&path, &args)?.trim().to_string();
+        git(&path, &["update-ref", CHAT_REF, &commit])?;
+
+        match git(&path, &["push", "origin", &format!("{CHAT_REF}:{CHAT_REF}")]) {
+            Ok(_) => return Ok(chat_read(&path)),
+            Err(e) => {
+                // non-fast-forward = someone chatted at the same moment;
+                // loop fetches the new tip and re-parents our message
+                let racy = e.contains("rejected")
+                    || e.contains("fetch first")
+                    || e.contains("non-fast-forward")
+                    || e.contains("stale info");
+                if !racy {
+                    return Err(e);
+                }
+                last_err = e;
+            }
+        }
+    }
+    Err(format!("could not send (push kept being rejected): {last_err}"))
+}
+
 // Clone a repository into `dest` and return the path of the new repo folder.
 #[tauri::command]
 async fn clone_repo(url: String, dest: String) -> Result<String, String> {
@@ -1618,6 +1715,8 @@ pub fn run() {
             file_worktree,
             diff_worktree_to_commit,
             clone_repo,
+            chat_pull,
+            chat_send,
             wip_status,
             stage_file,
             unstage_file,

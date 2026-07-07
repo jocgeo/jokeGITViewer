@@ -58,6 +58,12 @@
             <svg class="tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <span>Search</span>
           </button>
+          <button class="tbtn hidden" id="chat-btn"
+            title="Repo chat — messages travel over a hidden git ref on the remote">
+            <svg class="tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>
+            <span>Chat</span>
+            <span id="chat-unread" class="hidden">0</span>
+          </button>
         </div>
 
         <div class="tb-right">
@@ -249,6 +255,22 @@
         <span id="sb-left" class="muted"></span>
         <span id="sb-right" class="muted"></span>
       </footer>
+    </div>
+
+    <!-- per-repo chat (only shown when enabled for the repo) -->
+    <div id="chat-panel" class="hidden">
+      <div id="chat-head">
+        <span id="chat-title">Chat</span>
+        <span class="chat-head-btns">
+          <button id="chat-refresh" class="mini" title="Fetch new messages now">⟳</button>
+          <button id="chat-close" class="mini">✕</button>
+        </span>
+      </div>
+      <div id="chat-msgs"></div>
+      <div id="chat-inputrow">
+        <input id="chat-input" type="text" placeholder="Message… (Enter to send)" />
+        <button id="chat-send">Send</button>
+      </div>
     </div>
   </body>
 </html>

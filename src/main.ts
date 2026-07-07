@@ -592,6 +592,7 @@ function switchTab(i: number) {
   active = i;
   renderTabs();
   renderActive();
+  syncChatToTab();
   saveSession();
   // fetch remote-tag status the first time this tab is viewed
   const t = cur();
@@ -610,6 +611,7 @@ function closeTab(i: number) {
   }
   renderTabs();
   renderActive();
+  syncChatToTab();
   saveSession();
 }
 
@@ -1982,6 +1984,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     active = tabs.length - 1;
     renderTabs();
     renderActive();
+    syncChatToTab();
     saveSession();
     saveRepoCache(path, repo);
     refreshRemoteTags(tab);
@@ -2076,6 +2079,7 @@ async function restoreSession() {
   active = Math.min(Math.max(0, data.active ?? 0), tabs.length - 1);
   renderTabs();
   renderActive();
+  syncChatToTab();
   saveSession();
 
   const t = cur();
@@ -3619,7 +3623,189 @@ function repoMenu(path: string): MenuItem[] {
       label: "Open Terminal here",
       action: () => invoke("open_terminal", { path }).catch((e) => errorModal(String(e))),
     },
+    chatEnabled(path)
+      ? {
+          label: "Disable Chat",
+          action: () => setChatEnabled(path, false),
+        }
+      : {
+          label: "Enable Chat…",
+          action: async () => {
+            const ok = await confirmModal(
+              "Enable repo chat?\n\nMessages are stored on a hidden git ref (refs/jkt-chat/main) and pushed to origin — everyone with repo access who ALSO enables chat can read and write them. Nothing is fetched or pushed unless enabled."
+            );
+            if (ok) setChatEnabled(path, true);
+          },
+        },
   ];
+}
+
+// ---- per-repo chat (STRICTLY opt-in: no UI, no fetches, no refs unless
+// the user enabled it for this repo) ----
+const chatKey = (path: string) => `jkt.chat:${path}`;
+const chatSeenKey = (path: string) => `jkt.chatseen:${path}`;
+const chatEnabled = (path: string): boolean =>
+  localStorage.getItem(chatKey(path)) === "1";
+function setChatEnabled(path: string, on: boolean) {
+  try {
+    if (on) localStorage.setItem(chatKey(path), "1");
+    else {
+      localStorage.removeItem(chatKey(path));
+      localStorage.removeItem(chatSeenKey(path));
+    }
+  } catch {}
+  if (!on) showChatPanel(false);
+  chatMsgs = [];
+  updateChatButton();
+  if (on) void chatPoll(true);
+  setStatus(on ? "Chat enabled for this repo" : "Chat disabled for this repo");
+}
+
+interface ChatMsg {
+  hash: string;
+  author: string;
+  email: string;
+  time: number;
+  text: string;
+}
+let chatMsgs: ChatMsg[] = [];
+let chatOpen = false;
+let chatPolling = false;
+const chatCache = new Map<string, ChatMsg[]>(); // per repo path
+
+// keep the chat state in step with the active tab
+function syncChatToTab() {
+  const t = cur();
+  chatMsgs = t ? (chatCache.get(t.repo.path) ?? []) : [];
+  updateChatButton();
+  if (chatOpen) {
+    if (t && chatEnabled(t.repo.path)) {
+      renderChatMsgs();
+      void chatPoll(true);
+    } else {
+      showChatPanel(false);
+    }
+  }
+}
+
+function updateChatButton() {
+  const t = cur();
+  const on = !!t && chatEnabled(t.repo.path);
+  $("chat-btn").classList.toggle("hidden", !on);
+  if (!on) showChatPanel(false);
+  updateChatUnread();
+}
+
+function updateChatUnread() {
+  const t = cur();
+  const badge = $("chat-unread");
+  if (!t || !chatEnabled(t.repo.path) || !chatMsgs.length) {
+    badge.classList.add("hidden");
+    return;
+  }
+  const seen = localStorage.getItem(chatSeenKey(t.repo.path)) ?? "";
+  const idx = chatMsgs.findIndex((m) => m.hash === seen);
+  const unread = idx === -1 ? chatMsgs.length : chatMsgs.length - 1 - idx;
+  badge.textContent = String(unread);
+  badge.classList.toggle("hidden", unread === 0 || chatOpen);
+}
+
+function markChatSeen() {
+  const t = cur();
+  if (!t || !chatMsgs.length) return;
+  try {
+    localStorage.setItem(chatSeenKey(t.repo.path), chatMsgs[chatMsgs.length - 1].hash);
+  } catch {}
+  updateChatUnread();
+}
+
+function showChatPanel(on: boolean) {
+  chatOpen = on;
+  $("chat-panel").classList.toggle("hidden", !on);
+  if (on) {
+    renderChatMsgs();
+    markChatSeen();
+    ($("chat-input") as HTMLInputElement).focus();
+    void chatPoll(true);
+  }
+}
+
+function renderChatMsgs() {
+  const t = cur();
+  if (!t) return;
+  $("chat-title").textContent = `Chat — ${basename(t.repo.path)}`;
+  const box = $("chat-msgs");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  box.innerHTML = "";
+  if (!chatMsgs.length) {
+    box.innerHTML = `<div class="chat-empty">No messages yet — say hi. Messages sync via origin (hidden ref), so teammates see them after their next chat fetch.</div>`;
+  }
+  for (const m of chatMsgs) {
+    const row = document.createElement("div");
+    row.className = "chat-msg";
+    row.innerHTML =
+      `<img class="chat-av" src="${avatarUrl(m.email || m.author)}" alt=""/>` +
+      `<div class="chat-body"><div class="chat-meta">` +
+      `<span class="chat-author">${escapeHtml(m.author)}</span>` +
+      `<span class="chat-time">${fmtDate(m.time)}</span></div>` +
+      `<div class="chat-text">${escapeHtml(m.text)}</div></div>`;
+    box.appendChild(row);
+  }
+  if (atBottom || true) box.scrollTop = box.scrollHeight; // keep pinned to newest
+}
+
+// fetch messages for the ACTIVE repo — only ever called when chat is enabled
+async function chatPoll(force = false) {
+  const t = cur();
+  if (!t || !chatEnabled(t.repo.path) || chatPolling) return;
+  if (!force && (isBusy() || t.repo.conflict.active)) return;
+  chatPolling = true;
+  const path = t.repo.path;
+  try {
+    const msgs = await invoke<ChatMsg[]>("chat_pull", { path });
+    chatCache.set(path, msgs);
+    if (cur()?.repo.path !== path) return; // tab switched meanwhile
+    const changed =
+      msgs.length !== chatMsgs.length ||
+      (msgs.length &&
+        chatMsgs.length &&
+        msgs[msgs.length - 1].hash !== chatMsgs[chatMsgs.length - 1].hash);
+    chatMsgs = msgs;
+    if (changed && chatOpen) {
+      renderChatMsgs();
+      markChatSeen();
+    }
+    updateChatUnread();
+  } catch {
+    /* offline / no origin — try again next tick */
+  } finally {
+    chatPolling = false;
+  }
+}
+
+async function chatSendCurrent() {
+  const t = cur();
+  if (!t || !chatEnabled(t.repo.path)) return;
+  const input = $("chat-input") as HTMLInputElement;
+  const text = input.value.trim();
+  if (!text) return;
+  const btn = $("chat-send") as HTMLButtonElement;
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    chatMsgs = await invoke<ChatMsg[]>("chat_send", { path: t.repo.path, text });
+    chatCache.set(t.repo.path, chatMsgs);
+    input.value = "";
+    renderChatMsgs();
+    markChatSeen();
+  } catch (e) {
+    errorModal(
+      "Could not send — do you have push access to origin?\n" + String(e)
+    );
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Send";
+  }
 }
 
 async function doCheckout(target: string, upstream?: string) {
@@ -4373,6 +4559,16 @@ window.addEventListener("DOMContentLoaded", () => {
   restoreSession();
   setInterval(pollActive, 1500); // local changes (files/stage/commits/branches)
   setInterval(autoFetch, 90000); // remote changes (someone pushed) — quiet fetch
+  setInterval(() => void chatPoll(), 30000); // repo chat — no-op unless enabled
+
+  // chat panel wiring (panel/button only visible when chat is enabled)
+  $("chat-btn").addEventListener("click", () => showChatPanel(!chatOpen));
+  $("chat-close").addEventListener("click", () => showChatPanel(false));
+  $("chat-refresh").addEventListener("click", () => void chatPoll(true));
+  $("chat-send").addEventListener("click", () => void chatSendCurrent());
+  $("chat-input").addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") void chatSendCurrent();
+  });
 });
 // clear drag state when any drag ends
 window.addEventListener("dragend", () => {
