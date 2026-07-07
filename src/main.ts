@@ -4,6 +4,114 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import hljs from "highlight.js/lib/core";
+import hlC from "highlight.js/lib/languages/c";
+import hlCpp from "highlight.js/lib/languages/cpp";
+import hlCsharp from "highlight.js/lib/languages/csharp";
+import hlCss from "highlight.js/lib/languages/css";
+import hlBash from "highlight.js/lib/languages/bash";
+import hlDockerfile from "highlight.js/lib/languages/dockerfile";
+import hlGo from "highlight.js/lib/languages/go";
+import hlIni from "highlight.js/lib/languages/ini";
+import hlJava from "highlight.js/lib/languages/java";
+import hlJavascript from "highlight.js/lib/languages/javascript";
+import hlJson from "highlight.js/lib/languages/json";
+import hlKotlin from "highlight.js/lib/languages/kotlin";
+import hlLua from "highlight.js/lib/languages/lua";
+import hlMakefile from "highlight.js/lib/languages/makefile";
+import hlMarkdown from "highlight.js/lib/languages/markdown";
+import hlPerl from "highlight.js/lib/languages/perl";
+import hlPhp from "highlight.js/lib/languages/php";
+import hlPowershell from "highlight.js/lib/languages/powershell";
+import hlPython from "highlight.js/lib/languages/python";
+import hlRuby from "highlight.js/lib/languages/ruby";
+import hlRust from "highlight.js/lib/languages/rust";
+import hlScss from "highlight.js/lib/languages/scss";
+import hlSql from "highlight.js/lib/languages/sql";
+import hlSwift from "highlight.js/lib/languages/swift";
+import hlTypescript from "highlight.js/lib/languages/typescript";
+import hlXml from "highlight.js/lib/languages/xml";
+import hlYaml from "highlight.js/lib/languages/yaml";
+import "highlight.js/styles/github-dark-dimmed.css";
+
+hljs.registerLanguage("c", hlC);
+hljs.registerLanguage("cpp", hlCpp);
+hljs.registerLanguage("csharp", hlCsharp);
+hljs.registerLanguage("css", hlCss);
+hljs.registerLanguage("bash", hlBash);
+hljs.registerLanguage("dockerfile", hlDockerfile);
+hljs.registerLanguage("go", hlGo);
+hljs.registerLanguage("ini", hlIni);
+hljs.registerLanguage("java", hlJava);
+hljs.registerLanguage("javascript", hlJavascript);
+hljs.registerLanguage("json", hlJson);
+hljs.registerLanguage("kotlin", hlKotlin);
+hljs.registerLanguage("lua", hlLua);
+hljs.registerLanguage("makefile", hlMakefile);
+hljs.registerLanguage("markdown", hlMarkdown);
+hljs.registerLanguage("perl", hlPerl);
+hljs.registerLanguage("php", hlPhp);
+hljs.registerLanguage("powershell", hlPowershell);
+hljs.registerLanguage("python", hlPython);
+hljs.registerLanguage("ruby", hlRuby);
+hljs.registerLanguage("rust", hlRust);
+hljs.registerLanguage("scss", hlScss);
+hljs.registerLanguage("sql", hlSql);
+hljs.registerLanguage("swift", hlSwift);
+hljs.registerLanguage("typescript", hlTypescript);
+hljs.registerLanguage("xml", hlXml);
+hljs.registerLanguage("yaml", hlYaml);
+
+// file extension -> highlight.js language id
+const HL_EXT: Record<string, string> = {
+  c: "c", h: "c",
+  cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp", hxx: "cpp", ino: "cpp",
+  cs: "csharp",
+  css: "css",
+  sh: "bash", bash: "bash", zsh: "bash",
+  dockerfile: "dockerfile",
+  go: "go",
+  ini: "ini", toml: "ini", cfg: "ini", conf: "ini", properties: "ini",
+  java: "java",
+  js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
+  json: "json",
+  kt: "kotlin", kts: "kotlin",
+  lua: "lua",
+  mk: "makefile", makefile: "makefile",
+  md: "markdown", markdown: "markdown",
+  pl: "perl", pm: "perl",
+  php: "php",
+  ps1: "powershell", psm1: "powershell", psd1: "powershell",
+  py: "python", pyw: "python",
+  rb: "ruby",
+  rs: "rust",
+  scss: "scss", sass: "scss", less: "scss",
+  sql: "sql",
+  swift: "swift",
+  ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
+  html: "xml", htm: "xml", xml: "xml", svg: "xml", xaml: "xml", vue: "xml", svelte: "xml",
+  yml: "yaml", yaml: "yaml",
+};
+
+function langForFile(file: string): string | null {
+  const base = file.split("/").pop()?.toLowerCase() ?? "";
+  if (base === "dockerfile") return "dockerfile";
+  if (base === "makefile" || base === "gnumakefile") return "makefile";
+  if (base === "cmakelists.txt") return "makefile";
+  const ext = base.includes(".") ? base.split(".").pop()! : "";
+  return HL_EXT[ext] ?? null;
+}
+
+// highlight ONE line of code (stateless per line — good enough for diffs);
+// falls back to plain escaping for unknown languages or hljs errors
+function hlLine(text: string, lang: string | null): string {
+  if (!lang || !text) return escapeHtml(text);
+  try {
+    return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+  } catch {
+    return escapeHtml(text);
+  }
+}
 
 // ---- types mirrored from the Rust backend ----
 interface Commit {
@@ -1676,7 +1784,7 @@ async function showBlame() {
         `<span class="bl-ind"></span>` +
         `<span class="bl-meta">${escapeHtml(meta)}</span>` +
         `<span class="ln">${i + 1}</span>` +
-        `<span class="dc">${escapeHtml(bl.content)}</span></div>`
+        `<span class="dc">${hlLine(bl.content, langForFile(file))}</span></div>`
       );
     })
     .join("");
@@ -1823,6 +1931,31 @@ async function openRepo() {
   });
   if (!picked || Array.isArray(picked)) return;
   await loadRepo(picked);
+}
+
+async function doClone() {
+  const url = await promptModal(
+    "Clone repository — URL",
+    "https://github.com/user/repo.git"
+  );
+  if (!url || !url.trim()) return;
+  const dest = await open({
+    directory: true,
+    title: "Select the folder to clone into",
+  });
+  if (!dest || Array.isArray(dest)) return;
+  setStatus(`cloning ${url.trim()}…`);
+  pushBusy("clone-btn");
+  try {
+    const path = await invoke<string>("clone_repo", { url: url.trim(), dest });
+    setStatus(`Cloned to ${path}`);
+    await loadRepo(path);
+  } catch (e) {
+    setStatus("");
+    errorModal("Clone failed:\n" + String(e));
+  } finally {
+    popBusy();
+  }
 }
 
 async function loadRepo(path: string, silent = false, parentPath?: string) {
@@ -2076,12 +2209,12 @@ function renderMergeSide(elId: string, side: "ours" | "theirs") {
     if (s.kind === "normal") {
       for (const l of s.lines!) {
         n++;
-        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
       }
     } else {
       for (const l of (side === "ours" ? s.ours! : s.theirs!)) {
         n++;
-        html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+        html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
       }
     }
   }
@@ -2156,7 +2289,7 @@ function renderMergeResult() {
     if (s.kind === "normal") {
       for (const l of s.lines!) {
         n++;
-        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
       }
       return;
     }
@@ -2173,12 +2306,12 @@ function renderMergeResult() {
     if (showOurs)
       for (const l of s.ours!) {
         const num = c ? String(++n) : "";
-        html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+        html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
       }
     if (showTheirs)
       for (const l of s.theirs!) {
         const num = c ? String(++n) : "";
-        html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${escapeHtml(l)}</span></div>`;
+        html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
       }
   });
   el.innerHTML = html;
@@ -2190,6 +2323,52 @@ function renderMergeResult() {
       mvUpdateSave();
     });
   });
+  updateMvConflictUi();
+}
+
+// conflict counter, prev/next jump targets and the side minimap
+let mvJumpIdx = -1;
+function updateMvConflictUi() {
+  const bars = Array.from($("mv-result").querySelectorAll<HTMLElement>(".confbar"));
+  const total = mvSegments.filter((s) => s.kind === "conflict").length;
+  const open = mvSegments.filter((s) => s.kind === "conflict" && !s.choice).length;
+  $("mv-count").textContent = total
+    ? open
+      ? `⚠ ${open} of ${total} conflict${total > 1 ? "s" : ""} unresolved`
+      : `✓ all ${total} conflict${total > 1 ? "s" : ""} resolved`
+    : "";
+  $("mv-count").classList.toggle("mv-count-done", total > 0 && open === 0);
+  ($("mv-prev") as HTMLButtonElement).disabled = !bars.length;
+  ($("mv-next") as HTMLButtonElement).disabled = !bars.length;
+
+  // minimap: one mark per conflict at its relative position (red = open,
+  // green = resolved); click jumps there
+  const el = $("mv-result");
+  const map = $("mv-minimap");
+  map.innerHTML = "";
+  const totalH = el.scrollHeight || 1;
+  bars.forEach((bar, i) => {
+    const idx = +bar.dataset.idx!;
+    const resolved = !!mvSegments[idx]?.choice;
+    const mark = document.createElement("div");
+    mark.className = `mm ${resolved ? "res" : "conf"}`;
+    mark.style.top = `${(bar.offsetTop / totalH) * 100}%`;
+    mark.title = resolved ? "resolved conflict" : "unresolved conflict";
+    mark.addEventListener("click", () => jumpToConflict(i));
+    map.appendChild(mark);
+  });
+}
+
+function jumpToConflict(i: number) {
+  if (mvManual) return;
+  const bars = Array.from($("mv-result").querySelectorAll<HTMLElement>(".confbar"));
+  if (!bars.length) return;
+  mvJumpIdx = ((i % bars.length) + bars.length) % bars.length;
+  const bar = bars[mvJumpIdx];
+  const el = $("mv-result");
+  el.scrollTop = bar.offsetTop - el.clientHeight / 2; // synced panes follow
+  bar.classList.add("conf-flash");
+  setTimeout(() => bar.classList.remove("conf-flash"), 700);
 }
 
 function resolveAll(side: Choice) {
@@ -2233,6 +2412,7 @@ async function openMergeView(file: string) {
   if (!t) return;
   mvFile = file;
   mvManual = false;
+  mvJumpIdx = -1;
   $("mergeview-title").textContent = file;
   $("mv-ours-code").innerHTML = "";
   $("mv-theirs-code").innerHTML = "";
@@ -2291,7 +2471,11 @@ async function finishMerge() {
   );
 }
 
+// language for syntax highlighting in the currently shown diff/blame view
+let hlLang: string | null = null;
+
 function showDiffText(title: string, diff: string) {
+  hlLang = diffCtx ? langForFile(diffCtx.file) : null;
   $("diffview-title").textContent = title;
   const body = $("diffview-body");
   body.innerHTML =
@@ -2782,6 +2966,7 @@ function renderCpRows() {
   const c = cpCtx;
   const scrollEl = document.getElementById("cp-scroll");
   if (!c || !scrollEl) return;
+  const cpLang = langForFile(c.file);
   const entries = parseDiffEntries(c.diff);
 
   // classify each change: part of the commit (pickable) or a local-only edit
@@ -2921,7 +3106,7 @@ function renderCpRows() {
               : "loc";
       return (
         `<span class="ln">${c2.ln || ""}</span>` +
-        `<span class="cpc ${side} ${cls}">${escapeHtml(c2.text)}</span>`
+        `<span class="cpc ${side} ${cls}">${hlLine(c2.text, cpLang)}</span>`
       );
     };
     el.innerHTML = cell(row.l, "l") + cell(row.r, "r");
@@ -4026,6 +4211,7 @@ function intraline(oldS: string, newS: string): { o: string; n: string } {
 // char-level highlighting on paired changed lines.
 function renderUnifiedDiff(diff: string): string {
   const lines = diff.split("\n");
+  const lang = hlLang; // set by the view that opened the diff
   let oldN = 0;
   let newN = 0;
   const rows: string[] = [];
@@ -4033,7 +4219,9 @@ function renderUnifiedDiff(diff: string): string {
     `<div class="dl ${cls}"><span class="ln">${ln1}</span>` +
     `<span class="ln">${ln2}</span><span class="dc">${codeHtml}</span></div>`;
 
-  // buffered consecutive removals/additions, flushed as a paired block
+  // buffered consecutive removals/additions, flushed as a paired block.
+  // Paired lines keep the character-level change highlight (no syntax there);
+  // everything else gets syntax highlighting.
   let dels: { text: string; ln: number }[] = [];
   let adds: { text: string; ln: number }[] = [];
   const flush = () => {
@@ -4044,7 +4232,7 @@ function renderUnifiedDiff(diff: string): string {
           "del",
           String(d.ln),
           "",
-          i < pair ? intraline(d.text, adds[i].text).o : escapeHtml(d.text)
+          i < pair ? intraline(d.text, adds[i].text).o : hlLine(d.text, lang)
         )
       )
     );
@@ -4054,7 +4242,7 @@ function renderUnifiedDiff(diff: string): string {
           "add",
           "",
           String(a.ln),
-          i < pair ? intraline(dels[i].text, a.text).n : escapeHtml(a.text)
+          i < pair ? intraline(dels[i].text, a.text).n : hlLine(a.text, lang)
         )
       )
     );
@@ -4093,7 +4281,7 @@ function renderUnifiedDiff(diff: string): string {
       dels.push({ text: line.slice(1), ln: oldN++ });
     } else {
       flush();
-      rows.push(row("ctx", String(oldN++), String(newN++), escapeHtml(line.slice(1))));
+      rows.push(row("ctx", String(oldN++), String(newN++), hlLine(line.slice(1), lang)));
     }
   }
   flush();
@@ -4102,6 +4290,7 @@ function renderUnifiedDiff(diff: string): string {
 
 window.addEventListener("DOMContentLoaded", () => {
   $("open-btn").addEventListener("click", openRepo);
+  $("clone-btn").addEventListener("click", doClone);
   $("fetch-btn").addEventListener("click", doFetch);
   $("pull-btn").addEventListener("click", doPull);
   $("push-btn").addEventListener("click", doPush);
@@ -4165,6 +4354,8 @@ window.addEventListener("DOMContentLoaded", () => {
   // merge resolver
   $("mv-ours").addEventListener("click", () => resolveAll("ours"));
   $("mv-theirs").addEventListener("click", () => resolveAll("theirs"));
+  $("mv-prev").addEventListener("click", () => jumpToConflict(mvJumpIdx - 1));
+  $("mv-next").addEventListener("click", () => jumpToConflict(mvJumpIdx + 1));
   $("mv-edit").addEventListener("click", toggleManual);
   $("mv-save").addEventListener("click", saveResolved);
   $("mv-close").addEventListener("click", () => showDiffView(false));

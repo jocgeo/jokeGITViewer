@@ -15,6 +15,10 @@
             <svg class="tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
             <span>Open</span>
           </button>
+          <button id="clone-btn" title="Clone a remote repository&#10;git clone &lt;url&gt;">
+            <svg class="tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+            <span>Clone</span>
+          </button>
           <span id="repo-path" class="muted">No repo open</span>
         </div>
 
@@ -150,6 +154,9 @@
             <div id="mergeview-head">
               <span id="mergeview-title"></span>
               <span class="mv-actions">
+                <span id="mv-count" title="Resolved / total conflicts in this file"></span>
+                <button class="mini" id="mv-prev" title="Jump to previous conflict">▲</button>
+                <button class="mini" id="mv-next" title="Jump to next conflict">▼</button>
                 <button class="mini" id="mv-ours">Use ours (all)</button>
                 <button class="mini" id="mv-theirs">Use theirs (all)</button>
                 <button class="mini" id="mv-edit">Edit text</button>
@@ -169,6 +176,7 @@
               <div class="mv-pane">
                 <div class="mv-label">Result</div>
                 <div id="mv-result" class="mv-code"></div>
+                <div id="mv-minimap" title="Conflict positions — click to jump"></div>
                 <textarea id="mv-output" class="hidden" spellcheck="false"></textarea>
               </div>
             </div>

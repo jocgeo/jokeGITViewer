@@ -939,6 +939,28 @@ async fn move_line(path: String, file: String, from: usize, to: usize) -> Result
     std::fs::write(&full, out).map_err(|e| e.to_string())
 }
 
+// Clone a repository into `dest` and return the path of the new repo folder.
+#[tauri::command]
+async fn clone_repo(url: String, dest: String) -> Result<String, String> {
+    // repo folder name from the URL (strip trailing .git and slashes)
+    let name = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("repo")
+        .trim_end_matches(".git")
+        .to_string();
+    #[cfg(windows)]
+    let target = format!("{}\\{}", dest.trim_end_matches(['/', '\\']).replace('/', "\\"), name);
+    #[cfg(not(windows))]
+    let target = format!("{}/{}", dest.trim_end_matches('/'), name);
+    if Path::new(&target).exists() {
+        return Err(format!("folder already exists: {target}"));
+    }
+    git(&dest, &["clone", "--", &url, &name])?;
+    Ok(target)
+}
+
 // current working-tree content of one file (for the cherry-pick split view)
 #[tauri::command]
 async fn file_worktree(path: String, file: String) -> Result<String, String> {
@@ -1189,8 +1211,11 @@ async fn open_terminal(path: String) -> Result<(), String> {
 async fn open_in_explorer(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
+        // explorer needs backslashes — repo paths can carry forward slashes
+        // (submodules, cloned repos); mixed separators open the wrong folder.
         // explorer.exe returns non-zero even on success, so don't check status
-        let _ = Command::new("explorer").arg(&path).spawn();
+        let win_path = path.replace('/', "\\");
+        let _ = Command::new("explorer").arg(&win_path).spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -1592,6 +1617,7 @@ pub fn run() {
             move_line,
             file_worktree,
             diff_worktree_to_commit,
+            clone_repo,
             wip_status,
             stage_file,
             unstage_file,
