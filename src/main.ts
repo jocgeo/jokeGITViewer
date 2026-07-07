@@ -1108,8 +1108,15 @@ function paintViewport() {
       } else {
         const r = Math.min(8, Math.abs(px - cx) / 2, Math.abs(py - cy) / 2);
         const dir = px > cx ? 1 : -1;
-        // down the child's lane, round the corner, then straight into the parent
-        d = `M ${cx} ${cy} L ${cx} ${py - r} Q ${cx} ${py} ${cx + dir * r} ${py} L ${px} ${py}`;
+        const isMergeEdge = p.node.parents.length > 1 && ph !== p.node.parents[0];
+        if (isMergeEdge) {
+          // merged branch: straight UP the parent's lane, corner at the merge
+          // row, then horizontally into the merge commit
+          d = `M ${cx} ${cy} L ${px - dir * r} ${cy} Q ${px} ${cy} ${px} ${cy + r} L ${px} ${py}`;
+        } else {
+          // fork: down the child's lane, corner at the parent's row
+          d = `M ${cx} ${cy} L ${cx} ${py - r} Q ${cx} ${py} ${cx + dir * r} ${py} L ${px} ${py}`;
+        }
       }
       const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
       const op = edgeOp(p.node.id, ph);
@@ -1496,9 +1503,17 @@ function fileRow(f: FileChange, depth: number, label: string, path: string, hash
           label: "Cherry-pick file into working tree",
           action: async () => {
             try {
-              await invoke("cherry_pick_file", { path, hash, file: f.path });
-              await afterStageChange();
-              setStatus(`Applied ${f.path} from ${hash.slice(0, 8)}`);
+              const conflict = await invoke<boolean>("cherry_pick_file", {
+                path,
+                hash,
+                file: f.path,
+              });
+              if (conflict) {
+                await reloadActive(`Cherry-pick of ${f.path} has conflicts — resolve them`);
+              } else {
+                await afterStageChange();
+                setStatus(`Applied ${f.path} from ${hash.slice(0, 8)}`);
+              }
             } catch (err) {
               errorModal("Cherry-pick file failed:\n" + String(err));
             }
@@ -2322,9 +2337,6 @@ async function openDiff(
       ? await invoke<string>("commit_diff", { path, hash, file })
       : await invoke<string>("wip_diff", { path, file });
     showDiffText(title, diff);
-    // commit diffs: offer per-line cherry-pick into the working tree
-    pickDiffCtx = hash ? { path, file, diff } : null;
-    if (hash) decoratePickableRows();
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
     $("diff-minimap").innerHTML = "";
@@ -2504,26 +2516,20 @@ async function stageSingleLine(kind: "add" | "del", ln: number) {
   }
 }
 
-// ---- line-level cherry-pick (commit diff -> working tree) ----
-// Unlike staging (which patches the index that exactly matches the shown
-// diff), picking targets the CURRENT worktree, so the patch keeps only ±3
-// context lines — git apply then matches by context and rejects cleanly if
-// the surroundings have changed too much.
-let pickDiffCtx: { path: string; file: string; diff: string } | null = null;
-
-// addsAsContext: treat the commit's OTHER added lines as context instead of
-// dropping them — needed when the commit created the file (no real context
-// exists) and the worktree file already contains those lines.
-// pairDelLn: old-side line number of the deletion paired with the picked add
-// (a CHANGED line) — kept in the patch so the pick REPLACES the old line
-// instead of inserting next to it.
-function buildPickLinePatch(
+// ---- cherry-pick patch builder (single line OR whole hunk) ----
+// Works EXACTLY like the staging patch builder: the diff's old side is the
+// working tree itself (diff_worktree_to_commit uses -R), so the patch base
+// always matches the apply target — no guessing, no drifting line numbers.
+// addLns: new-side line numbers to insert; delLns: old-side line numbers to
+// remove. A changed line = its del + its add together (replacement).
+function buildCpPatch(
   diff: string,
-  sel: { kind: "add" | "del"; ln: number },
-  ctx = 3,
-  addsAsContext = false,
-  pairDelLn?: number
+  addLns: number[],
+  delLns: number[],
+  ctx = 3
 ): string | null {
+  const adds = new Set(addLns);
+  const dels = new Set(delLns);
   const lines = diff.split("\n");
   let file = "";
   let oldN = 0;
@@ -2531,45 +2537,39 @@ function buildPickLinePatch(
   let inHunk = false;
   let hunkStart = 0;
   let entries: { t: " " | "-" | "+"; text: string }[] = [];
-  let selIdx = -1;
-  let pairIdx = -1;
+  let selIdxs: number[] = [];
 
   for (const line of lines) {
     if (line === "") continue;
     if (line.startsWith("+++ ")) {
-      file = line.slice(4).replace(/^b\//, "").trim();
+      // -R diffs swap the prefixes too ("+++ a/…"), so strip either one
+      file = line.slice(4).replace(/^[ab]\//, "").trim();
       continue;
     }
     if (line.startsWith("@@")) {
-      if (selIdx >= 0) break; // hunk with the selection already collected
+      if (selIdxs.length) break; // hunk with the selections already collected
       const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (!m) continue;
       oldN = +m[1];
       newN = +m[2];
       hunkStart = oldN;
       entries = [];
-      pairIdx = -1;
       inHunk = true;
       continue;
     }
     if (!inHunk || line.startsWith("\\")) continue;
     if (line.startsWith("+")) {
-      if (sel.kind === "add" && newN === sel.ln) {
-        selIdx = entries.length;
+      if (adds.has(newN)) {
+        selIdxs.push(entries.length);
         entries.push({ t: "+", text: line.slice(1) });
-      } else if (addsAsContext) {
-        entries.push({ t: " ", text: line.slice(1) }); // assume present in target
       } // otherwise: not picked, and not in the target file — drop
       newN++;
       continue;
     }
     if (line.startsWith("-")) {
-      if (sel.kind === "del" && oldN === sel.ln) {
-        selIdx = entries.length;
+      if (dels.has(oldN)) {
+        selIdxs.push(entries.length);
         entries.push({ t: "-", text: line.slice(1) });
-      } else if (pairDelLn !== undefined && oldN === pairDelLn) {
-        pairIdx = entries.length;
-        entries.push({ t: "-", text: line.slice(1) }); // replaced old line
       } else {
         entries.push({ t: " ", text: line.slice(1) }); // deletion not picked
       }
@@ -2584,13 +2584,11 @@ function buildPickLinePatch(
     }
     // meta line (diff/index/mode/…): before a hunk only — ignore
   }
-  if (selIdx < 0 || !file) return null;
+  if (!selIdxs.length || !file) return null;
 
-  // trim to ±ctx entries around the selection (covering the paired del too)
-  const lo = pairIdx >= 0 ? Math.min(selIdx, pairIdx) : selIdx;
-  const hi = pairIdx >= 0 ? Math.max(selIdx, pairIdx) : selIdx;
-  const a = Math.max(0, lo - ctx);
-  const b = Math.min(entries.length, hi + ctx + 1);
+  // trim to ±ctx entries around the whole selection span
+  const a = Math.max(0, Math.min(...selIdxs) - ctx);
+  const b = Math.min(entries.length, Math.max(...selIdxs) + ctx + 1);
   const win = entries.slice(a, b);
   // old-side offset of the window inside the hunk
   const skippedOld = entries.slice(0, a).filter((e) => e.t !== "+").length;
@@ -2606,158 +2604,10 @@ function buildPickLinePatch(
   );
 }
 
-// put a "pick" button on every changed row of a commit diff
-function decoratePickableRows() {
-  const body = $("diffview-body");
-  body.querySelectorAll<HTMLElement>(".dl.add, .dl.del").forEach((row) => {
-    const kind = row.classList.contains("add") ? "add" : "del";
-    const lns = row.querySelectorAll(".ln");
-    const ln = parseInt((kind === "add" ? lns[1] : lns[0])?.textContent ?? "", 10);
-    if (!Number.isFinite(ln)) return;
-    row.classList.add("stg");
-    const btn = document.createElement("span");
-    btn.className = "stg-btn pick-btn";
-    btn.textContent = "⇣";
-    btn.title = "Cherry-pick this line into the working tree";
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      pickSingleLine(kind as "add" | "del", ln);
-    });
-    row.insertBefore(btn, row.firstChild);
-  });
-}
-
-// raw text of the selected changed line (for the append fallback)
-function changedLineText(
-  diff: string,
-  sel: { kind: "add" | "del"; ln: number }
-): string | null {
-  let oldN = 0;
-  let newN = 0;
-  let inHunk = false;
-  for (const line of diff.split("\n")) {
-    if (line === "") continue;
-    if (line.startsWith("@@")) {
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (m) {
-        oldN = +m[1];
-        newN = +m[2];
-        inHunk = true;
-      }
-      continue;
-    }
-    if (!inHunk || line.startsWith("\\") || line.startsWith("+++") || line.startsWith("---"))
-      continue;
-    if (line.startsWith("+")) {
-      if (sel.kind === "add" && newN === sel.ln) return line.slice(1);
-      newN++;
-      continue;
-    }
-    if (line.startsWith("-")) {
-      if (sel.kind === "del" && oldN === sel.ln) return line.slice(1);
-      oldN++;
-      continue;
-    }
-    oldN++;
-    newN++;
-  }
-  return null;
-}
-
-// what a successful pick did — needed to undo it on a second click
-type PickResult = { patch: string } | { appended: string } | null;
-
-async function pickSingleLine(
-  kind: "add" | "del",
-  ln: number,
-  pairDelLn?: number
-): Promise<PickResult> {
-  const c = pickDiffCtx;
-  if (!c) return null;
-  const patch = buildPickLinePatch(c.diff, { kind, ln }, 3, false, pairDelLn);
-  if (!patch) return null;
-  let lastErr: unknown = null;
-  let used: string | null = null;
-  try {
-    await invoke("apply_patch_worktree", { path: c.path, patch });
-    used = patch;
-  } catch (e) {
-    lastErr = e;
-    // retry with the commit's other added lines as context — covers picking
-    // from the commit that created the file (no real context available)
-    const alt = buildPickLinePatch(c.diff, { kind, ln }, 3, true, pairDelLn);
-    if (alt && alt !== patch) {
-      try {
-        await invoke("apply_patch_worktree", { path: c.path, patch: alt });
-        used = alt;
-      } catch (e2) {
-        lastErr = e2;
-      }
-    }
-  }
-  if (used === null) {
-    // no position in the target file matches — offer appending at the end
-    // (not for replacements: appending a changed line would duplicate it)
-    const text =
-      kind === "add" && pairDelLn === undefined
-        ? changedLineText(c.diff, { kind, ln })
-        : null;
-    if (text !== null) {
-      const ok = await confirmModal(
-        `No matching position found in ${c.file} — the surrounding lines differ too much.\n\nAppend the line at the END of the file instead?`
-      );
-      if (!ok) return null;
-      try {
-        await invoke("append_line_to_file", { path: c.path, file: c.file, text });
-        await afterStageChange();
-        setStatus(`Line appended at the end of ${c.file}`);
-        return { appended: text };
-      } catch (e3) {
-        errorModal("Append failed:\n" + String(e3));
-        return null;
-      }
-    }
-    errorModal(
-      "Could not apply this line — the file has changed too much here:\n" +
-        String(lastErr)
-    );
-    return null;
-  }
-  await afterStageChange(); // WIP counts + graph pick up the new change
-  setStatus("Line cherry-picked into the working tree");
-  return { patch: used };
-}
-
-// undo a previously picked line (second click on the same row)
-async function unpickSingleLine(applied: Exclude<PickResult, null>): Promise<boolean> {
-  const c = pickDiffCtx;
-  if (!c) return false;
-  try {
-    if ("patch" in applied) {
-      await invoke("apply_patch_worktree", {
-        path: c.path,
-        patch: applied.patch,
-        reverse: true,
-      });
-    } else {
-      await invoke("remove_last_line_if", {
-        path: c.path,
-        file: c.file,
-        text: applied.appended,
-      });
-    }
-    await afterStageChange();
-    setStatus("Line pick reverted");
-    return true;
-  } catch (e) {
-    errorModal(
-      "Could not revert this line — the file changed since it was applied:\n" + String(e)
-    );
-    return false;
-  }
-}
-
-// ---- interactive cherry-pick view (split: working tree | commit file) ----
+// ---- interactive cherry-pick view (worktree ⟷ commit, side-by-side) ----
+// Built on ONE diff: working tree (left/old) -> commit's file (right/new).
+// Every row of both panes comes from the same entry list, so the panes are
+// always line-aligned and the numbers shown are the REAL current file lines.
 interface DiffEntry {
   t: " " | "+" | "-";
   text: string;
@@ -2794,56 +2644,6 @@ function parseDiffEntries(diff: string): DiffEntry[] {
   return out;
 }
 
-// Patience-style alignment: map the diff's old-side line numbers to row
-// indices in the current worktree file. Lines that are UNIQUE in both files
-// become anchors; the stretches between anchors are filled greedily. This
-// keeps common filler lines ("", "}", …) from grabbing matches far away.
-function alignOldToLeft(entries: DiffEntry[], left: string[]): Map<number, number> {
-  const oldSeq = entries.filter((e) => e.t !== "+");
-  const map = new Map<number, number>();
-  if (!oldSeq.length || !left.length) return map;
-
-  const countL = new Map<string, number>();
-  left.forEach((t) => countL.set(t, (countL.get(t) ?? 0) + 1));
-  const countO = new Map<string, number>();
-  oldSeq.forEach((e) => countO.set(e.text, (countO.get(e.text) ?? 0) + 1));
-  const posL = new Map<string, number>();
-  left.forEach((t, i) => {
-    if (countL.get(t) === 1) posL.set(t, i);
-  });
-
-  // unique-in-both anchor pairs, kept monotonic
-  const anchors: { oi: number; li: number }[] = [];
-  let lastLi = -1;
-  oldSeq.forEach((e, oi) => {
-    if (countO.get(e.text) !== 1) return;
-    const li = posL.get(e.text);
-    if (li !== undefined && li > lastLi) {
-      anchors.push({ oi, li });
-      lastLi = li;
-    }
-  });
-
-  // fill between anchors with bounded greedy exact matching
-  let prev = { oi: -1, li: -1 };
-  for (const a of [...anchors, { oi: oldSeq.length, li: left.length }]) {
-    let li = prev.li + 1;
-    for (let oi = prev.oi + 1; oi < a.oi; oi++) {
-      const e = oldSeq[oi];
-      for (let j = li; j < a.li; j++) {
-        if (left[j] === e.text) {
-          map.set(e.oldLn, j);
-          li = j + 1;
-          break;
-        }
-      }
-    }
-    if (a.oi < oldSeq.length) map.set(oldSeq[a.oi].oldLn, a.li);
-    prev = a;
-  }
-  return map;
-}
-
 let cpOn = false;
 function setCpBtn(on: boolean) {
   cpOn = on;
@@ -2860,17 +2660,41 @@ async function doCherryPickFile() {
   if (!diffCtx || !diffCtx.hash) return;
   const { path, file, hash } = diffCtx;
   try {
-    await invoke("cherry_pick_file", { path, hash, file });
-    await afterStageChange();
-    setStatus(`Applied ${file} from ${hash.slice(0, 8)} to the working tree`);
+    const conflict = await invoke<boolean>("cherry_pick_file", { path, hash, file });
+    if (conflict) {
+      // conflict markers written — bring up the resolver panel
+      await reloadActive(`Cherry-pick of ${file} has conflicts — resolve them`);
+    } else {
+      await afterStageChange();
+      setStatus(`Applied ${file} from ${hash.slice(0, 8)} to the working tree`);
+    }
   } catch (e) {
     errorModal("Cherry-pick file failed:\n" + String(e));
   }
 }
 
+// picks applied in this view; patch is reverse-applied to undo
+interface CpApplied {
+  patch: string;
+  texts: string[]; // resulting line texts (empty for pure deletions)
+  ln: number; // approx worktree line after apply (for re-finding the rows)
+  kind: "add" | "del" | "hunk";
+}
+
+let cpCtx: {
+  path: string;
+  file: string;
+  hash: string;
+  diff: string; // worktree -> commit, full context (-R)
+  cAdd: Map<string, number>; // lines the commit itself ADDED (multiset)
+  cDel: Map<string, number>; // lines the commit itself DELETED (multiset)
+  applied: CpApplied[];
+} | null = null;
+
 async function toggleCherryPickLines() {
   if (!diffCtx || !diffCtx.hash) return;
   if (cpOn) {
+    cpCtx = null;
     lastView?.(); // back to the normal diff
     return;
   }
@@ -2878,391 +2702,385 @@ async function toggleCherryPickLines() {
   const body = $("diffview-body");
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
   try {
-    const [diff, worktree] = await Promise.all([
+    const [wtDiff, commitDiff] = await Promise.all([
+      invoke<string>("diff_worktree_to_commit", { path, hash, file }),
       invoke<string>("commit_diff", { path, hash, file }),
-      invoke<string>("file_worktree", { path, file }).catch(() => ""),
     ]);
-    renderCherryPick(path, file, hash, diff, worktree);
+    // what the commit actually changed — used to tell its changes apart from
+    // unrelated local edits (those show purple and are not pickable)
+    const cAdd = new Map<string, number>();
+    const cDel = new Map<string, number>();
+    for (const e of parseDiffEntries(commitDiff)) {
+      if (e.t === "+") cAdd.set(e.text, (cAdd.get(e.text) ?? 0) + 1);
+      else if (e.t === "-") cDel.set(e.text, (cDel.get(e.text) ?? 0) + 1);
+    }
+    cpCtx = { path, file, hash, diff: wtDiff, cAdd, cDel, applied: [] };
+    setCpBtn(true);
+    setBlameBtn(false);
+    $("diffview-title").textContent =
+      `Cherry-pick lines · ${file} — ${hash.slice(0, 8)} → working tree`;
+    body.innerHTML =
+      `<div id="cp-cols">` +
+      `<span class="cp-gut"></span>` +
+      `<span class="cp-col-ln"></span><span class="cp-col">Working tree — current file</span>` +
+      `<span class="cp-col-ln"></span><span class="cp-col">Commit ${hash.slice(0, 8)} — click a line, or ⇣ for the whole block</span>` +
+      `</div>` +
+      `<div id="cp-scroll"></div>`;
+    renderCpRows();
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+    $("diff-minimap").innerHTML = "";
   }
 }
 
-function renderCherryPick(
-  path: string,
-  file: string,
-  hash: string,
-  diff: string,
-  worktree: string
-) {
-  setCpBtn(true);
-  setBlameBtn(false);
-  pickDiffCtx = { path, file, diff }; // pickSingleLine works off this
-  $("diffview-title").textContent =
-    `Cherry-pick lines · ${file} — ${hash.slice(0, 8)} → working tree`;
-  $("diff-minimap").innerHTML = "";
-  const body = $("diffview-body");
-  body.innerHTML =
-    `<div class="cpwrap">` +
-    `<div class="cp-pane"><div class="cp-head">Working tree — current file</div>` +
-    `<div class="cp-body" id="cp-left"></div></div>` +
-    `<div class="cp-pane"><div class="cp-head">Commit ${hash.slice(0, 8)} — hover a change to preview, click to apply</div>` +
-    `<div class="cp-body" id="cp-right"></div></div>` +
-    `</div>`;
+// re-fetch the worktree diff (after any apply/revert/move) and re-render —
+// numbers always reflect the CURRENT file, so picks can never go stale
+async function refreshCpDiff() {
+  if (!cpCtx) return;
+  const scrollEl = document.getElementById("cp-scroll");
+  const scroll = scrollEl ? scrollEl.scrollTop : 0;
+  try {
+    cpCtx.diff = await invoke<string>("diff_worktree_to_commit", {
+      path: cpCtx.path,
+      hash: cpCtx.hash,
+      file: cpCtx.file,
+    });
+  } catch {
+    /* keep the old diff; next action re-tries */
+  }
+  renderCpRows();
+  const el = document.getElementById("cp-scroll");
+  if (el) el.scrollTop = scroll;
+}
 
-  const entries = parseDiffEntries(diff);
-  let leftLines = splitFileLines(worktree);
-  let map = alignOldToLeft(entries, leftLines);
+async function cpApplyPatch(patch: string): Promise<boolean> {
+  if (!cpCtx) return false;
+  try {
+    await invoke("apply_patch_worktree", { path: cpCtx.path, patch });
+    await afterStageChange();
+    return true;
+  } catch (e) {
+    errorModal("Could not apply this change:\n" + String(e));
+    return false;
+  }
+}
 
-  // pair del/add runs: the i-th deleted line of a change block pairs with the
-  // i-th added line — those are CHANGED lines, picked as a replacement
-  const pairDelOf = new Map<number, number>(); // add entry idx -> paired oldLn
-  {
-    let delRun: number[] = [];
-    let addRun: number[] = [];
-    const flushRuns = () => {
-      const n = Math.min(delRun.length, addRun.length);
-      for (let i = 0; i < n; i++) pairDelOf.set(addRun[i], entries[delRun[i]].oldLn);
-      delRun = [];
-      addRun = [];
-    };
-    entries.forEach((e, i) => {
-      if (e.t === "-") {
-        if (addRun.length) flushRuns();
-        delRun.push(i);
-      } else if (e.t === "+") {
-        addRun.push(i);
-      } else {
-        flushRuns();
+async function cpRevert(a: CpApplied): Promise<void> {
+  if (!cpCtx) return;
+  try {
+    await invoke("apply_patch_worktree", { path: cpCtx.path, patch: a.patch, reverse: true });
+    cpCtx.applied = cpCtx.applied.filter((x) => x !== a);
+    await afterStageChange();
+    setStatus("Line pick reverted");
+    await refreshCpDiff();
+  } catch (e) {
+    errorModal("Could not revert — the file changed here since:\n" + String(e));
+  }
+}
+
+function renderCpRows() {
+  const c = cpCtx;
+  const scrollEl = document.getElementById("cp-scroll");
+  if (!c || !scrollEl) return;
+  const entries = parseDiffEntries(c.diff);
+
+  // classify each change: part of the commit (pickable) or a local-only edit
+  // (purple). Multisets are consumed so duplicated lines count correctly.
+  const availAdd = new Map(c.cAdd);
+  const availDel = new Map(c.cDel);
+  const take = (m: Map<string, number>, t: string): boolean => {
+    const n = m.get(t) ?? 0;
+    if (n <= 0) return false;
+    m.set(t, n - 1);
+    return true;
+  };
+
+  interface Cell {
+    ln: number;
+    text: string;
+    pick: boolean;
+  }
+  interface Row {
+    kind: "ctx" | "change";
+    l?: Cell; // worktree side
+    r?: Cell; // commit side
+  }
+  const rows: Row[] = [];
+  let delBuf: Cell[] = [];
+  let addBuf: Cell[] = [];
+  const flush = () => {
+    const n = Math.max(delBuf.length, addBuf.length);
+    for (let i = 0; i < n; i++) rows.push({ kind: "change", l: delBuf[i], r: addBuf[i] });
+    delBuf = [];
+    addBuf = [];
+  };
+  let lastOldLn = 0;
+  for (const e of entries) {
+    if (e.t === " ") {
+      flush();
+      rows.push({
+        kind: "ctx",
+        l: { ln: e.oldLn, text: e.text, pick: false },
+        r: { ln: e.newLn, text: e.text, pick: false },
+      });
+      lastOldLn = e.oldLn;
+    } else if (e.t === "-") {
+      if (addBuf.length) flush();
+      delBuf.push({ ln: e.oldLn, text: e.text, pick: take(availDel, e.text) });
+      lastOldLn = e.oldLn;
+    } else {
+      addBuf.push({ ln: e.newLn, text: e.text, pick: take(availAdd, e.text) });
+    }
+  }
+  flush();
+  const fileLines = lastOldLn; // current worktree length (old side)
+
+  // marks for picks already applied: they became context rows — re-find them
+  // by text near the recorded line so they stay green + revertable
+  const markOf = new Map<number, CpApplied>(); // row index -> applied pick
+  for (const a of c.applied) {
+    a.texts.forEach((t, ti) => {
+      let best = -1;
+      let bestDist = 30;
+      rows.forEach((row, i) => {
+        if (row.kind !== "ctx" || !row.l || row.l.text !== t || markOf.has(i)) return;
+        const dist = Math.abs(row.l.ln - a.ln);
+        if (dist < bestDist) {
+          best = i;
+          bestDist = dist;
+        }
+      });
+      if (best >= 0) {
+        markOf.set(best, a);
+        if (ti === 0) a.ln = rows[best].l!.ln; // self-heal recorded position
       }
     });
-    flushRuns();
   }
-  // paired del only counts while its old line still exists in the worktree
-  const activePairDel = (idx: number): number | undefined => {
-    const oldLn = pairDelOf.get(idx);
-    if (oldLn === undefined) return undefined;
-    return map.get(oldLn) !== undefined ? oldLn : undefined;
-  };
 
-  const leftEl = $("cp-left");
-  // picks already applied — re-highlighted in the left pane on every refresh
-  type Mark = { kind: "add" | "del"; text: string; at: number };
-  const appliedMarks = new Set<Mark>();
-  let dragMark: Mark | null = null; // applied line being dragged to a new spot
-
-  const refreshLeft = async () => {
-    const scroll = leftEl.scrollTop;
-    try {
-      const wt = await invoke<string>("file_worktree", { path, file });
-      leftLines = splitFileLines(wt);
-    } catch {
-      leftLines = [];
-    }
-    map = alignOldToLeft(entries, leftLines);
-    renderLeft();
-    updateRightStates();
-    leftEl.scrollTop = scroll;
-  };
-
-  // move the dragged applied line so it sits ABOVE index `to`
-  const moveDragged = async (to: number) => {
-    const m = dragMark;
-    dragMark = null;
-    clearMarks();
-    if (!m) return;
-    const from = m.at;
-    if (to === from || to === from + 1) return; // dropped where it already is
-    try {
-      await invoke("move_line", { path, file, from, to });
-      m.at = to > from ? to - 1 : to;
-      await afterStageChange();
-      await refreshLeft();
-      setStatus("Line moved");
-    } catch (e) {
-      errorModal("Move failed:\n" + String(e));
-    }
-  };
-
-  const paintMarks = () => {
-    appliedMarks.forEach((m) => {
-      if (m.kind === "add") {
-        // inserted line: green — search near the recorded position (other
-        // picks may have shifted it)
-        let idx = leftLines[m.at] === m.text ? m.at : -1;
-        for (let d = 1; d <= 10 && idx < 0; d++) {
-          if (leftLines[m.at - d] === m.text) idx = m.at - d;
-          else if (leftLines[m.at + d] === m.text) idx = m.at + d;
+  // group consecutive unapplied change rows into blocks ("hunks") — a gutter
+  // button on the first row picks the whole block at once
+  interface Grp {
+    adds: number[];
+    dels: number[];
+    texts: string[];
+    rowIdxs: number[];
+  }
+  const grpFirst = new Map<number, Grp>();
+  {
+    let cur: Grp | null = null;
+    rows.forEach((row, i) => {
+      if (row.kind === "change" && !markOf.has(i)) {
+        if (!cur) {
+          cur = { adds: [], dels: [], texts: [], rowIdxs: [] };
         }
-        if (idx < 0) return;
-        m.at = idx; // self-heal the recorded position
-        const row = leftEl.children[idx] as HTMLElement | undefined;
-        if (!row) return;
-        row.classList.add("cp-applied");
-        // wrong spot? drag the line where it belongs
-        row.draggable = true;
-        row.title = "Drag to move this line if the placement is wrong";
-        row.addEventListener("dragstart", (ev) => {
-          dragMark = m;
-          row.classList.add("cp-dragging");
+        cur.rowIdxs.push(i);
+        if (row.r?.pick) {
+          cur.adds.push(row.r.ln);
+          cur.texts.push(row.r.text);
+          if (row.l) cur.dels.push(row.l.ln); // replacement includes the old line
+        } else if (!row.r && row.l?.pick) {
+          cur.dels.push(row.l.ln);
+        }
+      } else {
+        if (cur && cur.adds.length + cur.dels.length >= 2)
+          grpFirst.set(cur.rowIdxs[0], cur);
+        cur = null;
+      }
+    });
+    if (cur !== null) {
+      const g: Grp = cur;
+      if (g.adds.length + g.dels.length >= 2) grpFirst.set(g.rowIdxs[0], g);
+    }
+  }
+
+  scrollEl.innerHTML = "";
+  let dragging: CpApplied | null = null;
+
+  rows.forEach((row, i) => {
+    const el = document.createElement("div");
+    const mark = markOf.get(i);
+    const pickable = (row.r?.pick || (!row.r && row.l?.pick)) ?? false;
+    const localOnly = row.kind === "change" && !pickable;
+    el.className =
+      "cprow " +
+      (row.kind === "change" ? "change" : "ctx") +
+      (mark ? " cp-done" : "") +
+      (localOnly ? " cp-local" : "");
+    const cell = (c2: Cell | undefined, side: "l" | "r"): string => {
+      if (!c2)
+        return `<span class="ln"></span><span class="cpc ${side} empty"></span>`;
+      const cls =
+        row.kind === "ctx"
+          ? "ctx"
+          : side === "l"
+            ? c2.pick
+              ? "del"
+              : "loc"
+            : c2.pick
+              ? "add"
+              : "loc";
+      return (
+        `<span class="ln">${c2.ln || ""}</span>` +
+        `<span class="cpc ${side} ${cls}">${escapeHtml(c2.text)}</span>`
+      );
+    };
+    el.innerHTML = cell(row.l, "l") + cell(row.r, "r");
+
+    // gutter: hunk button on the first row of a multi-change block
+    const gut = document.createElement("span");
+    gut.className = "cp-gut";
+    const g = grpFirst.get(i);
+    if (g) {
+      const btn = document.createElement("button");
+      btn.className = "cp-hunk-btn";
+      btn.textContent = "⇣";
+      btn.title = `Cherry-pick this whole block — ${g.adds.length + g.dels.length} change(s)`;
+      btn.addEventListener("mouseenter", () =>
+        g.rowIdxs.forEach((ri) => scrollEl.children[ri]?.classList.add("cp-grp"))
+      );
+      btn.addEventListener("mouseleave", () =>
+        g.rowIdxs.forEach((ri) => scrollEl.children[ri]?.classList.remove("cp-grp"))
+      );
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const patch = buildCpPatch(c.diff, g.adds, g.dels);
+        if (!patch) return;
+        if (!(await cpApplyPatch(patch))) return;
+        c.applied.push({
+          patch,
+          texts: g.texts,
+          ln: rows[g.rowIdxs[0]].l?.ln ?? lastOldLnBefore(rows, g.rowIdxs[0]) + 1,
+          kind: "hunk",
+        });
+        setStatus(`Block applied — ${g.adds.length + g.dels.length} change(s)`);
+        await refreshCpDiff();
+      });
+      gut.appendChild(btn);
+    }
+    el.prepend(gut);
+
+    if (mark) {
+      el.title =
+        mark.kind === "hunk"
+          ? "Picked ✓ (block) — click to revert the whole block"
+          : "Picked ✓ — click to revert, drag to move";
+      el.addEventListener("click", () => void cpRevert(mark));
+      // drag a picked line somewhere else if the position is wrong (single
+      // lines only — a block has no single position)
+      if (mark.kind !== "hunk") {
+        el.draggable = true;
+        el.addEventListener("dragstart", (ev) => {
+          dragging = mark;
+          el.classList.add("cp-dragging");
           if (ev.dataTransfer) {
             ev.dataTransfer.effectAllowed = "move";
-            ev.dataTransfer.setData("text/plain", m.text);
+            ev.dataTransfer.setData("text/plain", mark.texts[0] ?? "");
           }
         });
-        row.addEventListener("dragend", () => {
-          dragMark = null;
-          row.classList.remove("cp-dragging");
-          clearMarks();
+        el.addEventListener("dragend", () => {
+          dragging = null;
+          el.classList.remove("cp-dragging");
+          scrollEl.querySelectorAll(".cp-ins").forEach((x) => x.classList.remove("cp-ins"));
+        });
+      }
+    } else if (row.kind === "change") {
+      if (pickable) {
+        const isReplace = !!(row.l && row.r);
+        el.title = isReplace
+          ? `Click to replace line ${row.l!.ln} with the commit's version (click again to revert)`
+          : row.r
+            ? "Click to insert this line from the commit (click again to revert)"
+            : `Click to remove line ${row.l!.ln} (commit deleted it)`;
+        el.addEventListener("click", async () => {
+          const addLns = row.r ? [row.r.ln] : [];
+          const delLns = row.l && (row.r || row.l.pick) ? [row.l.ln] : [];
+          const patch = buildCpPatch(c.diff, addLns, delLns);
+          if (!patch) return;
+          if (!(await cpApplyPatch(patch))) return;
+          c.applied.push({
+            patch,
+            texts: row.r ? [row.r.text] : [],
+            ln: row.l?.ln ?? lastOldLnBefore(rows, i) + 1,
+            kind: row.r ? "add" : "del",
+          });
+          setStatus(
+            row.r && row.l
+              ? `Line ${row.l.ln} replaced with the commit's version`
+              : row.r
+                ? "Line inserted from the commit"
+                : `Line ${row.l!.ln} removed`
+          );
+          await refreshCpDiff();
         });
       } else {
-        // removed line: red seam where it used to be
-        const i = Math.min(m.at, leftEl.children.length - 1);
-        if (i >= 0) leftEl.children[i]?.classList.add("cp-removed");
+        el.title = "Local change — not part of this commit, nothing to pick";
+        el.addEventListener("click", () =>
+          setStatus("This is a local change — not part of this commit")
+        );
+      }
+    }
+
+    // drop target for dragged picked lines (needs a real worktree line)
+    el.addEventListener("dragover", (ev) => {
+      if (!dragging || !row.l) return;
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+      scrollEl.querySelectorAll(".cp-ins").forEach((x) => x.classList.remove("cp-ins"));
+      el.classList.add("cp-ins");
+    });
+    el.addEventListener("drop", async (ev) => {
+      if (!dragging || !row.l) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const m = dragging;
+      dragging = null;
+      const from = m.ln - 1;
+      const to = row.l.ln - 1;
+      if (to === from || to === from + 1) return;
+      try {
+        await invoke("move_line", { path: c.path, file: c.file, from, to });
+        m.ln = (to > from ? to - 1 : to) + 1;
+        await afterStageChange();
+        setStatus("Line moved");
+        await refreshCpDiff();
+      } catch (e) {
+        errorModal("Move failed:\n" + String(e));
       }
     });
-  };
 
-  const renderLeft = () => {
-    leftEl.innerHTML = "";
-    if (!leftLines.length)
-      leftEl.innerHTML = `<div class="cpl ctx"><span class="ln"></span><span class="dc">(file not in working tree)</span></div>`;
-    leftLines.forEach((text, i) => {
-      const row = document.createElement("div");
-      row.className = "cpl";
-      row.innerHTML = `<span class="ln">${i + 1}</span><span class="dc">${escapeHtml(text)}</span>`;
-      // drop target: insert the dragged applied line above this row
-      row.addEventListener("dragover", (ev) => {
-        if (!dragMark) return;
-        ev.preventDefault();
-        if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
-        clearMarks();
-        row.classList.add("cp-ins");
-      });
-      row.addEventListener("drop", (ev) => {
-        if (!dragMark) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        void moveDragged(i);
-      });
-      leftEl.appendChild(row);
-    });
-    paintMarks();
-  };
-  renderLeft();
-
-  // drop below the last row -> move to the end of the file
-  leftEl.addEventListener("dragover", (ev) => {
-    if (!dragMark || ev.target !== leftEl) return;
-    ev.preventDefault();
-    clearMarks();
-    leftEl.lastElementChild?.classList.add("cp-ins-after");
+    scrollEl.appendChild(el);
   });
-  leftEl.addEventListener("drop", (ev) => {
-    if (!dragMark || ev.target !== leftEl) return;
-    ev.preventDefault();
-    void moveDragged(leftLines.length);
+  if (!rows.length)
+    scrollEl.innerHTML = `<div class="cprow ctx"><span class="ln"></span><span class="cpc l ctx">(no differences — the working tree already matches this commit's file)</span></div>`;
+
+  // minimap: green/red = pickable changes, purple = local-only, bright = done
+  const mapEl = $("diff-minimap");
+  mapEl.innerHTML = "";
+  const total = rows.length || 1;
+  rows.forEach((row, i) => {
+    let kind = "";
+    if (markOf.has(i)) kind = "done";
+    else if (row.kind !== "change") return;
+    else if (!(row.r?.pick || (!row.r && row.l?.pick))) kind = "dup";
+    else kind = row.r ? "add" : "del";
+    const mark = document.createElement("div");
+    mark.className = `mm ${kind}`;
+    mark.style.top = `${(i / total) * 100}%`;
+    mark.addEventListener("click", () => {
+      scrollEl.scrollTop = (i / total) * scrollEl.scrollHeight - scrollEl.clientHeight / 2;
+    });
+    mapEl.appendChild(mark);
   });
-
-  // insertion index in the left file for an add entry (after the nearest
-  // preceding old-side line that we could match); -1 = unknown
-  const insPoint = (idx: number): number => {
-    for (let i = idx - 1; i >= 0; i--) {
-      const e = entries[i];
-      if (e.t === "+") continue;
-      const hit = map.get(e.oldLn);
-      if (hit !== undefined) return hit + 1;
-    }
-    return leftLines.length ? 0 : -1; // no anchor above -> top of file
-  };
-
-  const clearMarks = () =>
-    leftEl
-      .querySelectorAll(".cp-ins, .cp-ins-after, .cp-del-hit, .cp-repl-hit")
-      .forEach((x) =>
-        x.classList.remove("cp-ins", "cp-ins-after", "cp-del-hit", "cp-repl-hit")
-      );
-
-  const markLeft = (e: DiffEntry, idx: number) => {
-    clearMarks();
-    // markers only — never scroll on hover (the panes scroll together anyway)
-    if (e.t === "+") {
-      const pairLn = activePairDel(idx);
-      if (pairLn !== undefined) {
-        // changed line: the old version gets REPLACED
-        const hit = map.get(pairLn);
-        if (hit !== undefined) leftEl.children[hit]?.classList.add("cp-repl-hit");
-        return;
-      }
-      const at = insPoint(idx);
-      if (at < 0) return;
-      if (at >= leftLines.length && leftEl.lastElementChild) {
-        leftEl.lastElementChild.classList.add("cp-ins-after"); // after last line
-      } else {
-        leftEl.children[at]?.classList.add("cp-ins"); // above this line
-      }
-    } else {
-      const hit = map.get(e.oldLn);
-      if (hit === undefined) return;
-      leftEl.children[hit]?.classList.add("cp-del-hit"); // would be removed
-    }
-  };
-
-  const rightEl = $("cp-right");
-  const rightRows: { row: HTMLElement; e: DiffEntry; idx: number }[] = [];
-
-  // a change that is ALREADY in the working tree (add present / line already
-  // deleted) — shown purple, not pickable (it would duplicate or do nothing)
-  const alreadyPresent = (e: DiffEntry, idx: number): boolean => {
-    if (e.t === "+") {
-      const at = insPoint(idx);
-      if (at < 0) return false;
-      for (let d = -2; d <= 2; d++) {
-        if (leftLines[at + d] === e.text) return true;
-      }
-      return false;
-    }
-    if (e.t === "-") return map.get(e.oldLn) === undefined; // already gone
-    return false;
-  };
-
-  const updateRightStates = () => {
-    // clear old purple hints on the left
-    leftEl.querySelectorAll(".cp-already").forEach((x) => x.classList.remove("cp-already"));
-    rightRows.forEach(({ row, e, idx }) => {
-      if (row.classList.contains("cp-done")) {
-        row.classList.remove("cp-already"); // applied by us — stays green
-        return;
-      }
-      const dup = alreadyPresent(e, idx);
-      row.classList.toggle("cp-already", dup);
-      if (dup)
-        row.title = "Already in the working tree — nothing to cherry-pick";
-      else
-        row.title =
-          e.t === "+"
-            ? "Click to insert this line into the working tree (click again to revert)"
-            : "Click to remove this line from the working tree (click again to revert)";
-      if (dup && e.t === "+") {
-        // purple the matching line on the left too, unless it's one of ours
-        const at = insPoint(idx);
-        for (let d = -2; d <= 2; d++) {
-          if (leftLines[at + d] === e.text) {
-            const l = leftEl.children[at + d];
-            if (l && !l.classList.contains("cp-applied")) l.classList.add("cp-already");
-            break;
-          }
-        }
-      }
-    });
-    buildCpMinimap();
-  };
-
-  // red/green (purple for already-present) marks on the right edge
-  const buildCpMinimap = () => {
-    const mapEl = $("diff-minimap");
-    mapEl.innerHTML = "";
-    const total = entries.length || 1;
-    rightRows.forEach(({ row, e, idx }) => {
-      const kind = row.classList.contains("cp-already")
-        ? "dup"
-        : e.t === "+"
-          ? "add"
-          : "del";
-      const mark = document.createElement("div");
-      mark.className = `mm ${kind}`;
-      mark.style.top = `${(idx / total) * 100}%`;
-      mark.addEventListener("click", () => {
-        rightEl.scrollTop = (idx / total) * rightEl.scrollHeight - rightEl.clientHeight / 2;
-      });
-      mapEl.appendChild(mark);
-    });
-  };
-
-  entries.forEach((e, idx) => {
-    const row = document.createElement("div");
-    const cls = e.t === "+" ? "add" : e.t === "-" ? "del" : "ctx";
-    row.className = `cpl ${cls}`;
-    const ln = e.t === "-" ? e.oldLn : e.newLn;
-    row.innerHTML = `<span class="ln">${ln}</span><span class="dc">${escapeHtml(e.text)}</span>`;
-    if (e.t !== " ") {
-      rightRows.push({ row, e, idx });
-      row.title =
-        e.t === "+"
-          ? "Click to insert this line into the working tree (click again to revert)"
-          : "Click to remove this line from the working tree (click again to revert)";
-      row.addEventListener("mouseenter", () => {
-        if (!row.classList.contains("cp-already")) markLeft(e, idx);
-      });
-      row.addEventListener("mouseleave", clearMarks);
-      let applied: PickResult = null;
-      let myMark: Mark | null = null;
-      let busy = false;
-      row.addEventListener("click", async () => {
-        if (busy) return;
-        if (!applied && row.classList.contains("cp-already")) {
-          setStatus("This change is already in the working tree");
-          return;
-        }
-        busy = true;
-        try {
-          if (applied) {
-            // second click: undo the pick
-            if (await unpickSingleLine(applied)) {
-              applied = null;
-              if (myMark) appliedMarks.delete(myMark);
-              myMark = null;
-              row.classList.remove("cp-done");
-              await refreshLeft();
-            }
-          } else {
-            // a changed line replaces its old version instead of inserting
-            const pairLn = e.t === "+" ? activePairDel(idx) : undefined;
-            applied = await pickSingleLine(
-              e.t === "+" ? "add" : "del",
-              e.t === "+" ? e.newLn : e.oldLn,
-              pairLn
-            );
-            if (applied) {
-              // remember where the change landed for the left-pane highlight
-              const at =
-                "appended" in applied
-                  ? leftLines.length // appended at end of file
-                  : e.t === "+"
-                    ? insPoint(idx)
-                    : (map.get(e.oldLn) ?? -1);
-              myMark = { kind: e.t === "+" ? "add" : "del", text: e.text, at };
-              appliedMarks.add(myMark);
-              row.classList.add("cp-done");
-              await refreshLeft();
-            }
-          }
-        } finally {
-          busy = false;
-        }
-      });
-    }
-    rightEl.appendChild(row);
-  });
-  updateRightStates(); // purple already-present detection + minimap
-
-  // scroll both panes together
-  let lock = false;
-  const link = (a: HTMLElement, b: HTMLElement) =>
-    a.addEventListener("scroll", () => {
-      if (lock) return;
-      lock = true;
-      b.scrollTop = a.scrollTop;
-      lock = false;
-    });
-  link(leftEl as HTMLElement, rightEl as HTMLElement);
-  link(rightEl as HTMLElement, leftEl as HTMLElement);
+  void fileLines;
 }
 
-function splitFileLines(content: string): string[] {
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  return lines;
+// worktree line number of the last real line above row i (insert position)
+function lastOldLnBefore(rows: { l?: { ln: number } }[], i: number): number {
+  for (let j = i - 1; j >= 0; j--) {
+    const l = rows[j].l;
+    if (l && l.ln) return l.ln;
+  }
+  return 0;
 }
 
 // show an image change as before/after previews

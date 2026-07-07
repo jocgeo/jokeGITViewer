@@ -306,6 +306,10 @@ fn load_conflict(path: &str) -> ConflictState {
         .map(|s| s.lines().map(|l| l.to_string()).collect())
         .unwrap_or_default();
 
+    // unmerged files without a merge/rebase/… in progress: a conflicted
+    // `git apply --3way` (file-level cherry-pick)
+    let kind = if kind.is_empty() && !files.is_empty() { "apply" } else { kind };
+
     ConflictState {
         active: !kind.is_empty() || !files.is_empty(),
         kind: kind.to_string(),
@@ -602,6 +606,15 @@ async fn resolve_write(path: String, file: String, content: String) -> Result<()
 
 #[tauri::command]
 async fn merge_abort(path: String, kind: String) -> Result<(), String> {
+    // conflicted file-level cherry-pick: no operation to abort — restore the
+    // conflicted files to their pre-pick state (they were clean, 3way requires it)
+    if kind == "apply" {
+        let files = git(&path, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        for f in files.lines().filter(|l| !l.trim().is_empty()) {
+            let _ = git(&path, &["checkout", "HEAD", "--", f]);
+        }
+        return Ok(());
+    }
     let cmd = match kind.as_str() {
         "rebase" => vec!["rebase", "--abort"],
         "cherry-pick" => vec!["cherry-pick", "--abort"],
@@ -614,9 +627,16 @@ async fn merge_abort(path: String, kind: String) -> Result<(), String> {
 // finish the operation once all conflicts are resolved
 #[tauri::command]
 async fn merge_continue(path: String, kind: String) -> Result<(), String> {
+    // file-level cherry-pick: resolving (git add) already finished the job —
+    // there is no in-progress operation to continue, the change sits staged
+    if kind == "apply" {
+        return Ok(());
+    }
     let r = match kind.as_str() {
         "rebase" => git_no_editor(&path, &["rebase", "--continue"]),
-        "cherry-pick" => git_no_editor(&path, &["cherry-pick", "--continue"]),
+        // never auto-commit a cherry-pick: end the sequencer, keep the
+        // resolved changes staged — the user commits explicitly
+        "cherry-pick" => git(&path, &["cherry-pick", "--quit"]),
         "revert" => git_no_editor(&path, &["revert", "--continue"]),
         _ => git_no_editor(&path, &["commit", "--no-edit"]),
     };
@@ -854,7 +874,7 @@ async fn wip_diff_split(path: String, file: String, staged: bool) -> Result<Stri
 // Applies that commit's diff for the file with a 3-way merge, so it still
 // works when the file has drifted since (conflict markers on real clashes).
 #[tauri::command]
-async fn cherry_pick_file(path: String, hash: String, file: String) -> Result<(), String> {
+async fn cherry_pick_file(path: String, hash: String, file: String) -> Result<bool, String> {
     let patch = git(
         &path,
         &[
@@ -873,10 +893,22 @@ async fn cherry_pick_file(path: String, hash: String, file: String) -> Result<()
     // plain apply first: worktree-only, works on locally-modified files and
     // leaves the change unstaged. If the context drifted, retry with a 3-way
     // merge (needs a clean index for the file; conflict markers on clashes).
-    match git_stdin(&path, &["apply", "--whitespace=nowarn"], &patch) {
-        Ok(_) => Ok(()),
-        Err(_) => git_stdin(&path, &["apply", "--3way", "--whitespace=nowarn"], &patch)
-            .map(|_| ()),
+    // Returns true when the 3-way left CONFLICTS to resolve in the UI.
+    if git_stdin(&path, &["apply", "--whitespace=nowarn"], &patch).is_ok() {
+        return Ok(false);
+    }
+    match git_stdin(&path, &["apply", "--3way", "--whitespace=nowarn"], &patch) {
+        Ok(_) => Ok(false),
+        Err(e) => {
+            // a conflicted 3-way still applied — markers in the file, unmerged
+            // stages in the index; the conflict resolver takes it from here
+            let unmerged = git(&path, &["ls-files", "-u", "--", &file]).unwrap_or_default();
+            if unmerged.trim().is_empty() {
+                Err(e) // genuinely failed, nothing written
+            } else {
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -912,6 +944,15 @@ async fn move_line(path: String, file: String, from: usize, to: usize) -> Result
 async fn file_worktree(path: String, file: String) -> Result<String, String> {
     let raw = std::fs::read(format!("{path}/{file}")).map_err(|e| e.to_string())?;
     String::from_utf8(raw).map_err(|_| "binary file".to_string())
+}
+
+// Diff with the WORKING TREE as the old side and the commit's version as the
+// new side (-R swaps). Line-level cherry-picking builds patches from this, so
+// the patch base always matches the apply target exactly — same guarantee the
+// staging view has (its diff base is the index it patches).
+#[tauri::command]
+async fn diff_worktree_to_commit(path: String, hash: String, file: String) -> Result<String, String> {
+    git(&path, &["diff", "-R", "-U100000", &hash, "--", &file])
 }
 
 // Last-resort line pick: no context anchors the line anywhere in the target
@@ -1233,7 +1274,23 @@ async fn rebase_branch_onto(path: String, source: String, target: String) -> Res
 #[tauri::command]
 async fn cherry_pick(path: String, hash: String) -> Result<bool, String> {
     let s = stash_if_dirty(&path)?;
-    run_or_conflict(&path, &["cherry-pick", &hash], s)
+    // --no-commit: never create the commit automatically — the changes land
+    // staged, the user reviews and commits explicitly
+    match git(&path, &["cherry-pick", "--no-commit", &hash]) {
+        Ok(_) => {
+            // -n leaves CHERRY_PICK_HEAD around (would look like a pending
+            // conflict to the UI) — clear the sequencer, keep the changes
+            let _ = git(&path, &["cherry-pick", "--quit"]);
+            Ok(s)
+        }
+        Err(e) => {
+            if load_conflict(&path).active {
+                Ok(s) // conflicts -> reload into the resolver
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1534,6 +1591,7 @@ pub fn run() {
             remove_last_line_if,
             move_line,
             file_worktree,
+            diff_worktree_to_commit,
             wip_status,
             stage_file,
             unstage_file,
