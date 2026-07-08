@@ -842,6 +842,38 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   outline-offset: -2px;
   transition: outline-color 0.6s;
 }
+/* hand-written conflict resolution */
+.ml.custom { background: rgba(56, 139, 253, 0.13); }
+.ml.custom .dc { color: #9cc4ff; }
+.mv-inline-edit { padding: 4px 8px; background: rgba(56, 139, 253, 0.08); }
+.mv-inline-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 6px 8px;
+  resize: vertical;
+  white-space: pre;
+}
+.mv-inline-btns { display: flex; gap: 6px; padding: 4px 0 6px; }
+/* single-line in-place edit of a normal result line */
+.mv-line-edit {
+  flex: 1 1 auto;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  padding: 0 8px;
+  margin: 0 2px;
+}
+.ml.editable:hover { background: rgba(255, 255, 255, 0.03); cursor: text; }
 .mv-label {
   flex: 0 0 auto;
   padding: 4px 10px;
@@ -872,7 +904,14 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   resize: none;
   outline: none;
 }
-.ml { display: flex; }
+/* fixed row metrics: all three resolver panes must agree pixel-exactly for
+   the side-by-side alignment (padded conflict blocks) to hold up */
+.ml { display: flex; height: 18px; line-height: 18px; overflow: hidden; }
+.ml.pad {
+  background: repeating-linear-gradient(45deg, transparent, transparent 5px,
+    rgba(255, 255, 255, 0.03) 5px, rgba(255, 255, 255, 0.03) 10px);
+}
+.ml.pad .ln { border-right: 1px solid var(--border); }
 .ml .ln {
   flex: 0 0 42px;
   text-align: right;
@@ -889,12 +928,17 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* conflicting lines get a stronger tint + accent bar */
 .ml.conf.ours { background: rgba(56, 139, 253, 0.28); box-shadow: inset 3px 0 0 #6db3ff; }
 .ml.conf.theirs { background: rgba(188, 140, 255, 0.28); box-shadow: inset 3px 0 0 #d6a8ff; }
+/* exact characters that differ between ours and theirs */
+.ml.ours .chg { background: rgba(56, 139, 253, 0.55); border-radius: 2px; }
+.ml.theirs .chg { background: rgba(188, 140, 255, 0.55); border-radius: 2px; }
 
 .confbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
+  height: 36px; /* exactly 2 rows (18px each) — keeps panes aligned */
+  box-sizing: border-box;
+  padding: 0 10px;
   background: var(--bg3);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);

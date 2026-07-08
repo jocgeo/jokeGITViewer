@@ -363,18 +363,24 @@ function showBranchDropMenu(
   target: string,
   path: string
 ) {
-  showMenu(x, y, [
+  const items: MenuItem[] = [
     {
-      label: `Merge ${source} into ${target}`,
+      label: dragSourceRemote
+        ? `Merge ${source} into ${target} (fetches first)`
+        : `Merge ${source} into ${target}`,
       action: () =>
         runAction(invoke("merge_into", { path, source, target }), `Merged ${source} into ${target}`),
     },
-    {
+  ];
+  // rebasing needs the SOURCE checked out — impossible for a remote ref
+  if (!dragSourceRemote) {
+    items.push({
       label: `Rebase ${source} onto ${target}`,
       action: () =>
         runAction(invoke("rebase_branch_onto", { path, source, target }), `Rebased ${source} onto ${target}`),
-    },
-  ]);
+    });
+  }
+  showMenu(x, y, items);
 }
 
 function toggleBranchHidden(t: Tab, key: string) {
@@ -881,17 +887,22 @@ function renderSidebar(t: Tab) {
           toggleBranchHidden(t, refKey(r));
         });
 
-        // drag & drop between local branches -> merge / rebase
-        if (kind === "local") {
+        // drag & drop: local AND remote branches can be dragged as the merge
+        // source; only local branches accept drops (you can't commit a merge
+        // into a remote-tracking ref)
+        if (kind === "local" || kind === "remote") {
           li.draggable = true;
           li.addEventListener("dragstart", (e) => {
             dragSource = r.name;
+            dragSourceRemote = kind === "remote";
             if (e.dataTransfer) {
               e.dataTransfer.effectAllowed = "move";
               e.dataTransfer.setData("text/plain", r.name);
             }
             li.classList.add("dragging");
           });
+        }
+        if (kind === "local") {
           const over = (e: DragEvent) => {
             if (dragSource && dragSource !== r.name) {
               e.preventDefault();
@@ -995,6 +1006,7 @@ function refUnits(refsHere: RefInfo[]): RefUnit[] {
 
 let gRemoteTags = new Set<string>(); // tags on origin, for the active render
 let dragSource: string | null = null; // branch being dragged (drag & drop)
+let dragSourceRemote = false; // dragged branch is a remote-tracking ref
 
 function unitBadge(u: RefUnit): string {
   let icons =
@@ -1338,11 +1350,12 @@ function attachRowEvents(
       const target = isRemote ? name.split("/").slice(1).join("/") : name;
       doCheckoutConfirm(t, target, isRemote ? name : undefined);
     });
-    if (isLocal) {
+    if (isLocal || b.dataset.refkind === "remote") {
       b.draggable = true;
       b.addEventListener("dragstart", (e) => {
         e.stopPropagation();
         dragSource = name;
+        dragSourceRemote = b.dataset.refkind === "remote";
         const dt = (e as DragEvent).dataTransfer;
         if (dt) {
           dt.effectAllowed = "move";
@@ -2186,13 +2199,14 @@ function showMergeView(on: boolean) {
 
 // ---- merge conflict resolution ----
 let mvFile = ""; // file currently open in the merge resolver
-type Choice = "ours" | "theirs" | "both" | null;
+type Choice = "ours" | "theirs" | "both" | "custom" | null;
 interface Seg {
   kind: "normal" | "conflict";
   lines?: string[];
   ours?: string[];
   theirs?: string[];
   choice?: Choice;
+  custom?: string[]; // hand-written resolution for this conflict
 }
 let mvSegments: Seg[] = [];
 let mvManual = false; // raw-textarea editing mode
@@ -2203,26 +2217,71 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
+// ---- side-by-side alignment ----
+// Every conflict block occupies the SAME number of rows in all three panes:
+// 2 spacer rows (matching the confbar height in the result) + the block's
+// content, padded with placeholder rows up to the longest side. With that,
+// the lockstep scrolling keeps ours/theirs/result perfectly lined up.
+const MV_PAD = `<div class="ml pad"><span class="ln"></span><span class="dc"></span></div>`;
+
+function conflictResultLen(s: Seg): number {
+  switch (s.choice) {
+    case "ours":
+      return s.ours!.length;
+    case "theirs":
+      return s.theirs!.length;
+    case "both":
+      return s.ours!.length + s.theirs!.length;
+    case "custom":
+      return (s.custom ?? []).length;
+    default:
+      return s.ours!.length + s.theirs!.length; // unresolved: stacked
+  }
+}
+function conflictBlockLen(s: Seg): number {
+  return Math.max(s.ours!.length, s.theirs!.length, conflictResultLen(s));
+}
+
 // render one side (ours/theirs) as a full numbered file with the conflicting
-// lines highlighted. Reconstructed from the parsed segments so it lines up
-// exactly with the conflicts shown in the Result pane.
+// lines highlighted, padded so it stays aligned with the other panes.
 function renderMergeSide(elId: string, side: "ours" | "theirs") {
+  const lang = langForFile(mvFile);
   let n = 0;
   let html = "";
   for (const s of mvSegments) {
     if (s.kind === "normal") {
       for (const l of s.lines!) {
         n++;
-        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
+        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${hlLine(l, lang)}</span></div>`;
       }
     } else {
-      for (const l of (side === "ours" ? s.ours! : s.theirs!)) {
+      html += MV_PAD + MV_PAD; // spacer matching the result's conflict bar
+      const lines = side === "ours" ? s.ours! : s.theirs!;
+      const other = side === "ours" ? s.theirs! : s.ours!;
+      const pairs = Math.min(s.ours!.length, s.theirs!.length);
+      lines.forEach((l, i) => {
         n++;
-        html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
-      }
+        // paired lines: highlight the exact characters that differ between
+        // ours and theirs (same mechanism as the diff view)
+        const code =
+          i < pairs
+            ? side === "ours"
+              ? intraline(l, other[i]).o
+              : intraline(other[i], l).n
+            : hlLine(l, lang);
+        html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${code}</span></div>`;
+      });
+      for (let p = lines.length; p < conflictBlockLen(s); p++) html += MV_PAD;
     }
   }
   $(elId).innerHTML = html;
+}
+
+// re-render all three panes (paddings depend on the current choices)
+function renderMergePanes() {
+  renderMergeSide("mv-ours-code", "ours");
+  renderMergeSide("mv-theirs-code", "theirs");
+  renderMergeResult();
 }
 
 // parse a file with conflict markers into normal/conflict segments
@@ -2277,6 +2336,7 @@ function buildMergedContent(): string {
     else if (s.choice === "ours") out.push(...s.ours!);
     else if (s.choice === "theirs") out.push(...s.theirs!);
     else if (s.choice === "both") out.push(...s.ours!, ...s.theirs!);
+    else if (s.choice === "custom") out.push(...(s.custom ?? []));
   }
   return out.join("\n") + "\n";
 }
@@ -2285,46 +2345,134 @@ function mvUpdateSave() {
   ($("mv-save") as HTMLButtonElement).disabled = !mvManual && !mvAllResolved();
 }
 
+let mvEditingIdx: number | null = null; // conflict currently in inline edit
+
 function renderMergeResult() {
   const el = $("mv-result");
+  const lang = langForFile(mvFile);
   let n = 0;
   let html = "";
   mvSegments.forEach((s, idx) => {
     if (s.kind === "normal") {
-      for (const l of s.lines!) {
+      s.lines!.forEach((l, li) => {
         n++;
-        html += `<div class="ml"><span class="ln">${n}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
-      }
+        // data-seg/-line: double-click a line to edit it in place
+        html += `<div class="ml editable" data-seg="${idx}" data-line="${li}" title="Double-click to edit this line"><span class="ln">${n}</span><span class="dc">${hlLine(l, lang)}</span></div>`;
+      });
       return;
     }
     const c = s.choice;
+    const blockLen = conflictBlockLen(s);
+    let contentRows = 0;
     html +=
       `<div class="confbar" data-idx="${idx}">` +
       `<span class="confbar-label">conflict</span>` +
       `<button data-act="ours" class="mini ${c === "ours" ? "sel" : ""}">ours</button>` +
       `<button data-act="theirs" class="mini ${c === "theirs" ? "sel" : ""}">theirs</button>` +
       `<button data-act="both" class="mini ${c === "both" ? "sel" : ""}">both</button>` +
+      `<button data-act="custom" class="mini ${c === "custom" ? "sel" : ""}" title="Write the resolution yourself">✎ edit</button>` +
       `</div>`;
-    const showOurs = c === null || c === "ours" || c === "both";
-    const showTheirs = c === null || c === "theirs" || c === "both";
-    if (showOurs)
-      for (const l of s.ours!) {
-        const num = c ? String(++n) : "";
-        html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
+    if (mvEditingIdx === idx) {
+      // inline editor for a hand-written resolution
+      const initial =
+        s.custom ??
+        (c === "ours"
+          ? s.ours!
+          : c === "theirs"
+            ? s.theirs!
+            : c === "both"
+              ? [...s.ours!, ...s.theirs!]
+              : [...s.ours!, ...s.theirs!]);
+      html +=
+        `<div class="mv-inline-edit" data-idx="${idx}">` +
+        `<textarea spellcheck="false" rows="${Math.min(14, Math.max(3, initial.length + 1))}">${escapeHtml(initial.join("\n"))}</textarea>` +
+        `<div class="mv-inline-btns"><button class="mini" data-ie="apply">✓ Apply</button>` +
+        `<button class="mini" data-ie="cancel">✕ Cancel</button></div></div>`;
+      return;
+    }
+    if (c === "custom") {
+      for (const l of s.custom ?? []) {
+        contentRows++;
+        html += `<div class="ml custom"><span class="ln">${String(++n)}</span><span class="dc">${hlLine(l, lang)}</span></div>`;
       }
-    if (showTheirs)
-      for (const l of s.theirs!) {
-        const num = c ? String(++n) : "";
-        html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${hlLine(l, langForFile(mvFile))}</span></div>`;
-      }
+    } else {
+      const showOurs = c === null || c === "ours" || c === "both";
+      const showTheirs = c === null || c === "theirs" || c === "both";
+      // undecided: both versions stacked — mark the exact differing characters
+      const pairs = c === null ? Math.min(s.ours!.length, s.theirs!.length) : 0;
+      if (showOurs)
+        s.ours!.forEach((l, i) => {
+          contentRows++;
+          const num = c ? String(++n) : "";
+          const code = i < pairs ? intraline(l, s.theirs![i]).o : hlLine(l, lang);
+          html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${code}</span></div>`;
+        });
+      if (showTheirs)
+        s.theirs!.forEach((l, i) => {
+          contentRows++;
+          const num = c ? String(++n) : "";
+          const code = i < pairs ? intraline(s.ours![i], l).n : hlLine(l, lang);
+          html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${code}</span></div>`;
+        });
+    }
+    // pad to the block height so all three panes stay row-aligned
+    for (let p = contentRows; p < blockLen; p++) html += MV_PAD;
   });
   el.innerHTML = html;
   el.querySelectorAll<HTMLElement>(".confbar button").forEach((b) => {
     b.addEventListener("click", () => {
       const idx = +(b.closest(".confbar") as HTMLElement).dataset.idx!;
-      mvSegments[idx].choice = b.dataset.act as Choice;
-      renderMergeResult();
+      if (b.dataset.act === "custom") {
+        mvEditingIdx = idx; // open the inline editor
+      } else {
+        mvSegments[idx].choice = b.dataset.act as Choice;
+        if (mvEditingIdx === idx) mvEditingIdx = null;
+      }
+      renderMergePanes();
       mvUpdateSave();
+    });
+  });
+  // inline conflict editor: apply / cancel
+  el.querySelectorAll<HTMLElement>(".mv-inline-edit").forEach((box) => {
+    const idx = +box.dataset.idx!;
+    const ta = box.querySelector("textarea")!;
+    box.querySelector('[data-ie="apply"]')?.addEventListener("click", () => {
+      const s = mvSegments[idx];
+      s.custom = ta.value.replace(/\r\n/g, "\n").split("\n");
+      s.choice = "custom";
+      mvEditingIdx = null;
+      renderMergePanes();
+      mvUpdateSave();
+    });
+    box.querySelector('[data-ie="cancel"]')?.addEventListener("click", () => {
+      mvEditingIdx = null;
+      renderMergePanes();
+    });
+    ta.focus();
+  });
+  // double-click a normal line to fix it in place
+  el.querySelectorAll<HTMLElement>(".ml.editable").forEach((row) => {
+    row.addEventListener("dblclick", () => {
+      const seg = +row.dataset.seg!;
+      const li = +row.dataset.line!;
+      const dc = row.querySelector(".dc") as HTMLElement;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "mv-line-edit";
+      input.value = mvSegments[seg].lines![li];
+      dc.replaceWith(input);
+      input.focus();
+      input.select();
+      const commit = (save: boolean) => {
+        if (save) mvSegments[seg].lines![li] = input.value;
+        renderMergePanes();
+        mvUpdateSave();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit(true);
+        else if (e.key === "Escape") commit(false);
+      });
+      input.addEventListener("blur", () => commit(true));
     });
   });
   updateMvConflictUi();
@@ -2380,7 +2528,7 @@ function resolveAll(side: Choice) {
     if (s.kind === "conflict") s.choice = side;
   });
   if (mvManual) toggleManual(); // back to rendered view
-  renderMergeResult();
+  renderMergePanes();
   mvUpdateSave();
 }
 
@@ -2417,6 +2565,7 @@ async function openMergeView(file: string) {
   mvFile = file;
   mvManual = false;
   mvJumpIdx = -1;
+  mvEditingIdx = null;
   $("mergeview-title").textContent = file;
   $("mv-ours-code").innerHTML = "";
   $("mv-theirs-code").innerHTML = "";
@@ -2432,9 +2581,7 @@ async function openMergeView(file: string) {
     );
     ($("mv-output") as HTMLTextAreaElement).value = v.merged;
     mvSegments = parseConflicts(v.merged);
-    renderMergeSide("mv-ours-code", "ours");
-    renderMergeSide("mv-theirs-code", "theirs");
-    renderMergeResult();
+    renderMergePanes();
     mvUpdateSave();
   } catch (e) {
     $("mv-result").textContent = String(e);

@@ -1365,14 +1365,32 @@ fn run_or_conflict(path: &str, args: &[&str], stashed: bool) -> Result<bool, Str
     }
 }
 
+// If `reference` is a remote-tracking branch ("origin/foo"), fetch that
+// branch first so merging/rebasing uses the server's LATEST state, not a
+// stale local copy. Best effort — offline just uses what's there.
+fn fetch_remote_branch(path: &str, reference: &str) {
+    if let Some((remote, branch)) = reference.split_once('/') {
+        let tracked = git(
+            path,
+            &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{reference}")],
+        )
+        .is_ok();
+        if tracked {
+            let _ = git(path, &["fetch", remote, branch]);
+        }
+    }
+}
+
 #[tauri::command]
 async fn merge_ref(path: String, reference: String) -> Result<bool, String> {
+    fetch_remote_branch(&path, &reference);
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["merge", "--no-edit", &reference], s)
 }
 
 #[tauri::command]
 async fn rebase_onto(path: String, reference: String) -> Result<bool, String> {
+    fetch_remote_branch(&path, &reference);
     let s = stash_if_dirty(&path)?;
     run_or_conflict(&path, &["rebase", &reference], s)
 }
@@ -1380,6 +1398,7 @@ async fn rebase_onto(path: String, reference: String) -> Result<bool, String> {
 // drag-and-drop: merge `source` branch into `target` (checks out target first)
 #[tauri::command]
 async fn merge_into(path: String, source: String, target: String) -> Result<bool, String> {
+    fetch_remote_branch(&path, &source); // remote source: merge the latest state
     let s = stash_if_dirty(&path)?;
     git(&path, &["checkout", &target])?;
     run_or_conflict(&path, &["merge", "--no-edit", &source], s)
