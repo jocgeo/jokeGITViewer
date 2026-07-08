@@ -1212,6 +1212,35 @@ function paintViewport() {
   const end = Math.min(placed.length, Math.ceil((top + vh) / ROW_H) + BUF);
 
   // --- SVG: edges (only those intersecting the viewport) + visible nodes ---
+  // occupancy grid: a cross-lane edge must not run vertically through rows
+  // where OTHER commits sit on that lane — pick the clear corridor instead
+  const occ = new Set<number>();
+  const OCC_W = 4096; // lanes per row slot (way above any real lane count)
+  let occMaxLane = 0;
+  for (const q of placed) {
+    occ.add(q.row * OCC_W + q.lane);
+    if (q.lane > occMaxLane) occMaxLane = q.lane;
+  }
+  const corridorClear = (lane: number, r1: number, r2: number): boolean => {
+    for (let r = r1 + 1; r < r2; r++) if (occ.has(r * OCC_W + lane)) return false;
+    return true;
+  };
+  // nearest lane whose rows r1..r2 are COMPLETELY free (for edge detours);
+  // one lane right of the graph is always free, so this always succeeds
+  const findFreeLane = (r1: number, r2: number, prefer: number): number => {
+    let best = occMaxLane + 1;
+    let bestDist = Math.abs(best - prefer);
+    for (let l = 0; l <= occMaxLane; l++) {
+      if (!corridorClear(l, r1 - 1, r2 + 1)) continue;
+      const dist = Math.abs(l - prefer);
+      if (dist < bestDist) {
+        best = l;
+        bestDist = dist;
+      }
+    }
+    return best;
+  };
+
   const parts: string[] = [];
   for (const p of placed) {
     for (const ph of p.node.parents) {
@@ -1231,13 +1260,33 @@ function paintViewport() {
         const r = Math.min(8, Math.abs(px - cx) / 2, Math.abs(py - cy) / 2);
         const dir = px > cx ? 1 : -1;
         const isMergeEdge = p.node.parents.length > 1 && ph !== p.node.parents[0];
-        if (isMergeEdge) {
-          // merged branch: straight UP the parent's lane, corner at the merge
-          // row, then horizontally into the merge commit
-          d = `M ${cx} ${cy} L ${px - dir * r} ${cy} Q ${px} ${cy} ${px} ${cy + r} L ${px} ${py}`;
+        // vertical corridor options: the parent's lane (corner at the child
+        // row), the child's lane (corner at the parent row), or — when both
+        // run through foreign commits — a detour via a completely free lane.
+        const parentClear = corridorClear(pp.lane, p.row, pp.row);
+        const childClear = corridorClear(p.lane, p.row, pp.row);
+        if (!parentClear && !childClear) {
+          // Z-shape: across at the child row, down the free lane, across
+          // into the parent — guaranteed not to cross any commit vertically
+          const fl = findFreeLane(p.row, pp.row, pp.lane);
+          const fx = laneX(fl);
+          const r2 = Math.min(8, Math.abs(fx - cx) / 2, Math.abs(px - fx) / 2, Math.abs(py - cy) / 2);
+          const d1 = fx > cx ? 1 : -1;
+          const d2 = px > fx ? 1 : -1;
+          d =
+            `M ${cx} ${cy} L ${fx - d1 * r2} ${cy} Q ${fx} ${cy} ${fx} ${cy + r2} ` +
+            `L ${fx} ${py - r2} Q ${fx} ${py} ${fx + d2 * r2} ${py} L ${px} ${py}`;
         } else {
-          // fork: down the child's lane, corner at the parent's row
-          d = `M ${cx} ${cy} L ${cx} ${py - r} Q ${cx} ${py} ${cx + dir * r} ${py} L ${px} ${py}`;
+          const useParentLane = isMergeEdge
+            ? parentClear // merges prefer the parent's lane
+            : parentClear && !childClear; // forks prefer the child's lane
+          if (useParentLane) {
+            // corner at the child's row, straight down the parent's lane
+            d = `M ${cx} ${cy} L ${px - dir * r} ${cy} Q ${px} ${cy} ${px} ${cy + r} L ${px} ${py}`;
+          } else {
+            // down the child's lane, corner at the parent's row
+            d = `M ${cx} ${cy} L ${cx} ${py - r} Q ${cx} ${py} ${cx + dir * r} ${py} L ${px} ${py}`;
+          }
         }
       }
       const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
