@@ -208,9 +208,13 @@ const REF_W = 280; // width of the left "Branch / Tag" column
 const WIP_ID = "__WIP__";
 const STASH_COLOR = "#e3b341";
 const WIP_COLOR = "#ff9d5c";
+// per-branch-line colors — wider palette since every branch gets its own
+// (neighboring chains cycle through it, so adjacent lines stay distinct)
 const COLORS = [
   "#6db3ff", "#7ee787", "#ffcf8f", "#d6a8ff",
   "#f4a3c0", "#5ed3d3", "#b8e060", "#ff9d5c",
+  "#8fa7ff", "#63e6a8", "#e6c445", "#c792ea",
+  "#ff8fa3", "#4fc3f7", "#a5d66f", "#ffb86c",
 ];
 
 // ---- app state ----
@@ -480,6 +484,12 @@ function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
     return lanes.length - 1;
   };
 
+  // Color per BRANCH LINE, not per lane: a chain of first-parent links keeps
+  // ONE color from its tip down — so it's obvious where a branch starts, ends
+  // or gets merged, even when lanes are reused or the chain shifts lanes.
+  const chainOf = new Map<string, number>();
+  let nextChain = 0;
+
   nodes.forEach((n, row) => {
     let lane = lanes.indexOf(n.id);
     if (lane === -1) lane = freeSlot();
@@ -498,8 +508,16 @@ function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
       }
     }
 
+    let chain = chainOf.get(n.id);
+    if (chain === undefined) chain = nextChain++; // a new branch tip starts here
+    // the FIRST child (topmost in the graph) continues the chain through its
+    // first parent; stash/WIP nodes never claim — they'd recolor the branch
+    if (n.kind === "commit" && n.parents.length && !chainOf.has(n.parents[0])) {
+      chainOf.set(n.parents[0], chain);
+    }
+
     maxLane = Math.max(maxLane, lane, lanes.length - 1);
-    let color = COLORS[lane % COLORS.length];
+    let color = COLORS[chain % COLORS.length];
     if (n.kind === "stash") color = STASH_COLOR;
     if (n.kind === "wip") color = WIP_COLOR;
     placed.push({ node: n, row, lane, color });
