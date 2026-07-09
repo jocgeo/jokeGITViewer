@@ -196,6 +196,7 @@ interface Tab {
   hidden?: Set<string>; // ref keys hidden from the graph
   stale?: boolean; // loaded from cache, needs a background refresh
   parentPath?: string; // set when this tab is a submodule of another repo
+  hlOff?: boolean; // lineage highlight cleared (click outside the graph)
 }
 
 // ---- layout constants ----
@@ -385,6 +386,16 @@ function showBranchDropMenu(
     });
   }
   showMenu(x, y, items);
+}
+
+// clicking outside the graph rows (sidebar, empty graph space) resets the
+// lineage highlight so every branch is shown at full strength again
+function clearGraphHighlight() {
+  const t = cur();
+  if (!t || t.hlOff || !t.selected) return;
+  t.hlOff = true;
+  t.hint = undefined;
+  paintViewport();
 }
 
 function toggleBranchHidden(t: Tab, key: string) {
@@ -1159,7 +1170,7 @@ function paintViewport() {
   //  0 = unrelated -> dimmed
   let branchLine: Set<string> | null = null;
   let connected: Set<string> | null = null; // ancestors + all descendants
-  if (t.selected && byId.has(t.selected)) {
+  if (t.selected && !t.hlOff && byId.has(t.selected)) {
     branchLine = new Set<string>();
     connected = new Set<string>();
     // children maps: first-parent (branch line) and all-parent (full descendants)
@@ -1550,6 +1561,7 @@ async function selectNode(n: GNode | null, scroll = false) {
   const t = cur();
   if (!t || !n) return;
   t.selected = n.id;
+  t.hlOff = false; // clicking a commit re-enables the lineage highlight
   showDiffView(false); // return main area to the graph
 
   // scroll the selected row into view (virtualized -> set scrollTop directly)
@@ -1839,6 +1851,8 @@ function clearFileHistory() {
 async function showBlame() {
   if (!diffCtx) return;
   setBlameBtn(true);
+  setPlainBtn(false);
+  dvfClose();
   const { path, file, hash } = diffCtx;
   const title = `Blame · ${file}`;
   $("diffview-title").textContent = title;
@@ -2256,6 +2270,7 @@ function showDiffView(on: boolean) {
   $("diffview").classList.toggle("hidden", !on);
   $("col-headers").classList.toggle("hidden", on);
   $("scroll").classList.toggle("hidden", on);
+  dvfClose(); // view content changes — stale find results would mislead
 }
 function showMergeView(on: boolean) {
   $("diffview").classList.add("hidden");
@@ -2716,6 +2731,161 @@ function setBlameBtn(on: boolean) {
   if (b) b.textContent = on ? "✕ Blame" : "Blame";
 }
 
+// ---- plain file view (the file as it is — selectable, copyable) ----
+let plainOn = false;
+let plainContent = ""; // raw text for the Copy button
+function setPlainBtn(on: boolean) {
+  plainOn = on;
+  const b = document.getElementById("diffview-plain");
+  if (b) b.textContent = on ? "✕ Plain" : "Plain";
+  $("diffview-copy").classList.toggle("hidden", !on);
+}
+
+async function togglePlainView() {
+  if (!diffCtx) return;
+  if (plainOn) {
+    lastView?.(); // back to the diff
+    return;
+  }
+  const { path, file, hash } = diffCtx;
+  const body = $("diffview-body");
+  body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  try {
+    // hash = "" -> current worktree content (same command handles both)
+    const content = await invoke<string>("file_at_commit", {
+      path,
+      hash: hash ?? "",
+      file,
+    });
+    plainContent = content;
+    setPlainBtn(true);
+    setBlameBtn(false);
+    dvfClose(); // body is replaced — drop stale find ranges
+    $("diffview-title").textContent =
+      `${file} — plain ${hash ? `@ ${hash.slice(0, 8)}` : "(working tree)"}`;
+    $("diff-minimap").innerHTML = "";
+    const lang = langForFile(file);
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    // line numbers via CSS counter (::before) — selecting + copying grabs
+    // ONLY the code, never the numbers
+    body.innerHTML =
+      `<div class="plainview">` +
+      lines.map((l) => `<div class="pl"><span class="plc">${hlLine(l, lang) || "&nbsp;"}</span></div>`).join("") +
+      `</div>`;
+  } catch (e) {
+    body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+  }
+}
+
+async function copyPlainFile() {
+  try {
+    await navigator.clipboard.writeText(plainContent);
+    setStatus("File content copied to clipboard");
+  } catch (e) {
+    errorModal("Copy failed:\n" + String(e));
+  }
+}
+
+// ---- Ctrl+F find inside the file/diff view ----
+let dvfMatches: Range[] = [];
+let dvfIdx = -1;
+
+function dvfOpen() {
+  $("dv-find").classList.remove("hidden");
+  const input = $("dvf-input") as HTMLInputElement;
+  input.focus();
+  input.select();
+  if (input.value) dvfRun(input.value);
+}
+
+function dvfClose() {
+  $("dv-find").classList.add("hidden");
+  dvfMatches = [];
+  dvfIdx = -1;
+  dvfPaint();
+}
+
+function dvfRun(query: string) {
+  const body = $("diffview-body");
+  dvfMatches = [];
+  const q = query.toLowerCase();
+  if (q) {
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    outer: while ((node = walker.nextNode())) {
+      const text = (node.textContent ?? "").toLowerCase();
+      let i = 0;
+      while ((i = text.indexOf(q, i)) !== -1) {
+        const r = new Range();
+        r.setStart(node, i);
+        r.setEnd(node, i + q.length);
+        dvfMatches.push(r);
+        i += q.length;
+        if (dvfMatches.length >= 2000) break outer; // sanity cap
+      }
+    }
+  }
+  dvfIdx = dvfMatches.length ? 0 : -1;
+  dvfPaint(true);
+}
+
+function dvfStep(dir: 1 | -1) {
+  if (!dvfMatches.length) return;
+  dvfIdx = (dvfIdx + dir + dvfMatches.length) % dvfMatches.length;
+  dvfPaint(true);
+}
+
+// CSS Custom Highlight API — marks matches without touching the DOM (so
+// syntax highlighting spans stay intact)
+function dvfPaint(scroll = false) {
+  const HL = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+  const registry = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+  $("dvf-count").textContent = dvfMatches.length ? `${dvfIdx + 1}/${dvfMatches.length}` : "0/0";
+  if (HL && registry) {
+    registry.set("dvf", new HL(...dvfMatches));
+    registry.set("dvf-cur", dvfIdx >= 0 ? new HL(dvfMatches[dvfIdx]) : new HL());
+  }
+  dvfPaintMinimap();
+  if (scroll && dvfIdx >= 0) {
+    const el = dvfMatches[dvfIdx].startContainer.parentElement;
+    el?.scrollIntoView({ block: "center" });
+  }
+}
+
+// yellow marks on the side rail — one per row with a match, click to jump
+function dvfPaintMinimap() {
+  const map = $("diff-minimap");
+  map.querySelectorAll(".mm.find").forEach((x) => x.remove());
+  if (!dvfMatches.length) return;
+  const body = $("diffview-body");
+  const bodyRect = body.getBoundingClientRect();
+  const total = body.scrollHeight || 1;
+  const seen = new Set<number>();
+  const cap = Math.min(dvfMatches.length, 1000);
+  for (let i = 0; i < cap; i++) {
+    const r = dvfMatches[i];
+    const el = (r.startContainer.parentElement?.closest(
+      ".dl, .bl, .cpl, .cprow, .pl"
+    ) ?? r.startContainer.parentElement) as HTMLElement | null;
+    if (!el) continue;
+    const top = el.getBoundingClientRect().top - bodyRect.top + body.scrollTop;
+    const bucket = Math.round((top / total) * 400); // one mark per rail slot
+    if (seen.has(bucket)) continue;
+    seen.add(bucket);
+    const idx = i;
+    const mark = document.createElement("div");
+    mark.className = "mm find";
+    mark.style.top = `${(top / total) * 100}%`;
+    mark.title = "search match — click to jump";
+    mark.addEventListener("click", () => {
+      dvfIdx = idx;
+      dvfPaint(true);
+    });
+    map.appendChild(mark);
+  }
+}
+
 async function openDiff(
   title: string,
   path: string,
@@ -2725,6 +2895,7 @@ async function openDiff(
   diffCtx = { path, file, hash };
   lastView = () => openDiff(title, path, file, hash);
   setBlameBtn(false);
+  setPlainBtn(false);
   setPickButtons(!!hash && !isImage(file));
   if (isImage(file)) {
     await showImageDiff(title, path, file, hash);
@@ -2750,11 +2921,13 @@ async function openDiff(
 // side (unstaged: index→worktree, staged: HEAD→index) and puts a clickable
 // +/− button on every changed line to stage/unstage just that line.
 let wipDiffCtx: { path: string; file: string; staged: boolean; diff: string } | null = null;
+let wipFull = false; // false = hunks only (default), true = whole file
 
 async function openWipDiff(path: string, file: string, staged: boolean) {
   diffCtx = { path, file, hash: null };
   lastView = () => openWipDiff(path, file, staged);
   setBlameBtn(false);
+  setPlainBtn(false);
   setPickButtons(false);
   wipDiffCtx = null;
   if (isImage(file)) {
@@ -2767,14 +2940,111 @@ async function openWipDiff(path: string, file: string, staged: boolean) {
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
   showDiffView(true);
   try {
-    const diff = await invoke<string>("wip_diff_split", { path, file, staged });
+    const diff = await invoke<string>("wip_diff_split", { path, file, staged, full: wipFull });
     wipDiffCtx = { path, file, staged, diff };
     showDiffText(title, diff);
     decorateStageableRows(staged);
+    if (!wipFull) decorateHunkRows(staged);
+    const wb = $("diffview-whole");
+    wb.classList.remove("hidden");
+    wb.textContent = wipFull ? "Hunks only" : "Whole file";
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
     $("diff-minimap").innerHTML = "";
   }
+}
+
+// split a unified diff into per-hunk mini-patches (header + one hunk each)
+function splitHunkPatches(diff: string): { patch: string; newFile: boolean }[] {
+  const lines = diff.split("\n");
+  let minus = "";
+  let plus = "";
+  const hunks: string[][] = [];
+  let cur: string[] | null = null;
+  for (const line of lines) {
+    if (line.startsWith("--- ")) {
+      minus = line;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      plus = line;
+      continue;
+    }
+    if (line.startsWith("@@")) {
+      if (cur) hunks.push(cur);
+      cur = [line];
+      continue;
+    }
+    if (
+      cur &&
+      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ") || line.startsWith("\\"))
+    ) {
+      cur.push(line);
+    }
+  }
+  if (cur) hunks.push(cur);
+  if (!minus || !plus) return [];
+  const newFile = minus.includes("/dev/null");
+  return hunks.map((h) => ({ patch: `${minus}\n${plus}\n${h.join("\n")}\n`, newFile }));
+}
+
+// GitKraken-style hunk bars: Stage/Unstage + Discard buttons on every @@ row
+function decorateHunkRows(staged: boolean) {
+  const c = wipDiffCtx;
+  if (!c) return;
+  const hunks = splitHunkPatches(c.diff);
+  const rows = $("diffview-body").querySelectorAll<HTMLElement>(".dl.hunk");
+  rows.forEach((row, i) => {
+    const h = hunks[i];
+    if (!h) return;
+    const btns = document.createElement("span");
+    btns.className = "hunk-btns";
+    if (!staged) {
+      const discard = document.createElement("button");
+      discard.className = "mini hunk-discard";
+      discard.textContent = "Discard hunk";
+      discard.title = "Throw these changes away (working tree) — cannot be undone";
+      discard.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!(await confirmModal("Discard this hunk from the working tree?\nThis cannot be undone.")))
+          return;
+        try {
+          await invoke("apply_patch_worktree", { path: c.path, patch: h.patch, reverse: true });
+          const scroll = $("diffview-body").scrollTop;
+          await afterStageChange();
+          setStatus("Hunk discarded");
+          await openWipDiff(c.path, c.file, c.staged);
+          $("diffview-body").scrollTop = scroll;
+        } catch (err) {
+          errorModal("Discard failed:\n" + String(err));
+        }
+      });
+      btns.appendChild(discard);
+    }
+    const stage = document.createElement("button");
+    stage.className = "mini hunk-stage";
+    stage.textContent = staged ? "Unstage hunk" : "Stage hunk";
+    stage.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await invoke("stage_lines_patch", {
+          path: c.path,
+          patch: h.patch,
+          reverse: staged,
+          intentFile: h.newFile && !staged ? c.file : null,
+        });
+        const scroll = $("diffview-body").scrollTop;
+        await afterStageChange();
+        setStatus(staged ? "Hunk unstaged" : "Hunk staged");
+        await openWipDiff(c.path, c.file, c.staged);
+        $("diffview-body").scrollTop = scroll;
+      } catch (err) {
+        errorModal((staged ? "Unstage" : "Stage") + " hunk failed:\n" + String(err));
+      }
+    });
+    btns.appendChild(stage);
+    row.appendChild(btns);
+  });
 }
 
 // add a stage/unstage button to every changed row of the rendered diff
@@ -3055,6 +3325,7 @@ function setCpBtn(on: boolean) {
 function setPickButtons(visible: boolean) {
   $("diffview-pickfile").classList.toggle("hidden", !visible);
   $("diffview-picklines").classList.toggle("hidden", !visible);
+  $("diffview-whole").classList.add("hidden"); // only the WIP views re-show it
   setCpBtn(false);
 }
 
@@ -3572,6 +3843,7 @@ async function openCompareDiff(path: string, hash: string, file: string) {
   diffCtx = { path, file, hash };
   lastView = () => openCompareDiff(path, hash, file);
   setBlameBtn(false);
+  setPlainBtn(false);
   setPickButtons(false);
   const title = `${file} — ${hash.slice(0, 8)} ↔ working`;
   if (isImage(file)) {
@@ -4292,7 +4564,11 @@ function confirmModal(title: string): Promise<boolean> {
 
 async function doCreateBranch(path: string, start: string) {
   const name = await promptModal("New branch name", "feature/my-branch");
-  if (name) runAction(invoke("create_branch", { path, name, start }), `Created branch ${name}`);
+  if (name)
+    runAction(
+      invoke("create_branch", { path, name, start }),
+      `Created & switched to ${name}`
+    );
 }
 async function doCreateTag(path: string, hash: string, annotated: boolean) {
   const name = await promptModal("Tag name", "v1.0.0");
@@ -4711,6 +4987,34 @@ window.addEventListener("DOMContentLoaded", () => {
   $("hist-close").addEventListener("click", clearFileHistory);
   $("diffview-pickfile").addEventListener("click", doCherryPickFile);
   $("diffview-picklines").addEventListener("click", toggleCherryPickLines);
+  $("diffview-plain").addEventListener("click", () => void togglePlainView());
+  $("diffview-copy").addEventListener("click", () => void copyPlainFile());
+  $("diffview-whole").addEventListener("click", () => {
+    const c = wipDiffCtx;
+    if (!c) return;
+    wipFull = !wipFull;
+    void openWipDiff(c.path, c.file, c.staged);
+  });
+  // find-in-file bar
+  $("dvf-input").addEventListener("input", (e) =>
+    dvfRun((e.target as HTMLInputElement).value)
+  );
+  $("dvf-input").addEventListener("keydown", (e) => {
+    const k = e as KeyboardEvent;
+    if (k.key === "Enter") dvfStep(k.shiftKey ? -1 : 1);
+    else if (k.key === "Escape") dvfClose();
+  });
+  $("dvf-prev").addEventListener("click", () => dvfStep(-1));
+  $("dvf-next").addEventListener("click", () => dvfStep(1));
+  $("dvf-close").addEventListener("click", dvfClose);
+  // clicking the sidebar or empty graph space resets the branch highlight
+  $("sidebar").addEventListener("click", clearGraphHighlight);
+  $("hist-panel").addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).closest(".hist-item")) clearGraphHighlight();
+  });
+  $("scroll").addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).closest(".crow")) clearGraphHighlight();
+  });
   // sync-scroll the 3 merge-resolver panes so lines stay aligned
   linkScroll(["mv-ours-code", "mv-theirs-code", "mv-result", "mv-output"]);
   setupSplitter("split-left", "sidebar", "left");
@@ -4800,7 +5104,9 @@ window.addEventListener("click", (e) => {
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
     e.preventDefault();
-    openSearch();
+    // file view open -> find inside the file; otherwise repo-wide search
+    if (!$("diffview").classList.contains("hidden")) dvfOpen();
+    else openSearch();
   }
 });
 window.addEventListener("scroll", closeMenu, true);

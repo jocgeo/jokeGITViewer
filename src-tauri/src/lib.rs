@@ -854,17 +854,24 @@ async fn wip_diff(path: String, file: String) -> Result<String, String> {
     }
 }
 
-// One side of the WIP only — the diffs line-level staging operates on.
+// One side of the WIP only — the diffs line/hunk staging operates on.
 //   staged=false: index -> worktree (what `git add` would stage)
 //   staged=true:  HEAD  -> index   (what `git reset` would unstage)
+// full=true renders the whole file as context; default is hunks-only (U3).
 #[tauri::command]
-async fn wip_diff_split(path: String, file: String, staged: bool) -> Result<String, String> {
+async fn wip_diff_split(
+    path: String,
+    file: String,
+    staged: bool,
+    full: Option<bool>,
+) -> Result<String, String> {
+    let ctx = if full.unwrap_or(false) { "-U100000" } else { "-U3" };
     if staged {
-        return git(&path, &["diff", "--cached", "-U100000", "--", &file]);
+        return git(&path, &["diff", "--cached", ctx, "--", &file]);
     }
     let tracked = git(&path, &["ls-files", "--error-unmatch", "--", &file]).is_ok();
     if tracked {
-        git(&path, &["diff", "-U100000", "--", &file])
+        git(&path, &["diff", ctx, "--", &file])
     } else {
         synth_untracked_diff(&path, &file)
     }
@@ -1452,7 +1459,18 @@ async fn reset_to(path: String, hash: String, mode: String) -> Result<(), String
 
 #[tauri::command]
 async fn create_branch(path: String, name: String, start: String) -> Result<(), String> {
-    git(&path, &["branch", &name, &start]).map(|_| ())
+    // create AND switch to it (auto-stash dirty changes so checkout can't block)
+    let dirty = !git(&path, &["status", "--porcelain", "--untracked-files=all"])?
+        .trim()
+        .is_empty();
+    if dirty {
+        git(&path, &["stash", "--include-untracked"])?;
+    }
+    git(&path, &["checkout", "-b", &name, &start])?;
+    if dirty {
+        let _ = git(&path, &["stash", "pop"]); // bring the changes along
+    }
+    Ok(())
 }
 
 #[tauri::command]

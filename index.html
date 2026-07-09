@@ -143,7 +143,17 @@
           <div id="diffview" class="hidden">
             <div id="diffview-head">
               <span id="diffview-title"></span>
+              <span id="dv-find" class="hidden">
+                <input id="dvf-input" type="text" placeholder="Find in file… (Enter = next)" />
+                <span id="dvf-count">0/0</span>
+                <button id="dvf-prev" class="mini" title="Previous match (Shift+Enter)">▲</button>
+                <button id="dvf-next" class="mini" title="Next match (Enter)">▼</button>
+                <button id="dvf-close" class="mini" title="Close (Esc)">✕</button>
+              </span>
               <span class="dv-btns">
+                <button id="diffview-whole" class="mini hidden" title="Toggle between changed hunks only and the whole file">Whole file</button>
+                <button id="diffview-copy" class="mini hidden" title="Copy the whole file content to the clipboard">⧉ Copy</button>
+                <button id="diffview-plain" class="mini" title="Show the file as it is (no diff markers) — selectable for copying">Plain</button>
                 <button id="diffview-pickfile" class="mini hidden" title="Apply this file's changes from the commit to the working tree">Cherry-pick file</button>
                 <button id="diffview-picklines" class="mini hidden" title="Pick single lines from this commit into the working tree">Cherry-pick lines</button>
                 <button id="diffview-history" class="mini" title="History of this file">History</button>

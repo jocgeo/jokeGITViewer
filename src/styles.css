@@ -788,6 +788,14 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .mm.add { background: #3fb950; }
 .mm.del { background: #f85149; }
 .mm.dup { background: #a371f7; }
+/* find-in-file matches on the rail — narrower + on top of change marks */
+.mm.find {
+  background: #ffd54f;
+  left: 4px;
+  right: 0;
+  height: 3px;
+  z-index: 2;
+}
 
 /* merge resolver (3-pane) */
 #mergeview { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -971,8 +979,21 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .dl.add .dc { color: #b5f0c0; }
 .dl.del { background: rgba(248, 81, 73, 0.16); }
 .dl.del .dc { color: #ffc0bc; }
-.dl.hunk { background: rgba(56, 139, 253, 0.12); }
+.dl.hunk {
+  background: rgba(56, 139, 253, 0.12);
+  align-items: center;
+  padding: 2px 0;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
 .dl.hunk .dc, .dl.meta .dc { color: var(--muted); }
+/* per-hunk stage/discard buttons on the @@ bars */
+.hunk-btns { margin-left: auto; display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
+.hunk-stage { border-color: #2ea043; color: #7ee787; }
+.hunk-stage:hover { background: rgba(46, 160, 67, 0.2); }
+.hunk-discard { border-color: #f85149; color: #ffa198; }
+.hunk-discard:hover { background: rgba(248, 81, 73, 0.18); }
 .dl.ctx .dc { color: var(--fg); }
 
 /* file history list */
@@ -1040,6 +1061,51 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .bl.bl-added:hover { background: rgba(63, 185, 80, 0.24); }
 .bl .ln { flex: 0 0 46px; text-align: right; padding: 0 8px; color: var(--muted); user-select: none; }
 .bl .dc { flex: 1 1 auto; padding: 0 10px; white-space: pre; }
+
+/* plain file view — selectable code; line numbers are ::before pseudo
+   content so copying grabs ONLY the code */
+.plainview {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  counter-reset: plainln;
+  padding-bottom: 12px;
+}
+.plainview .pl { display: flex; }
+.plainview .pl::before {
+  counter-increment: plainln;
+  content: counter(plainln);
+  flex: 0 0 46px;
+  text-align: right;
+  padding-right: 10px;
+  color: var(--muted);
+  opacity: 0.7;
+  user-select: none;
+  border-right: 1px solid var(--border);
+}
+.plainview .plc {
+  flex: 1 1 auto;
+  padding: 0 12px;
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
+
+/* find-in-file bar + match marks */
+#dv-find { display: flex; align-items: center; gap: 6px; }
+#dv-find.hidden { display: none; }
+#dvf-input {
+  width: 220px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--fg);
+  padding: 3px 8px;
+  font-size: 12px;
+}
+#dvf-count { font-size: 11px; color: var(--muted); min-width: 40px; text-align: center; }
+::highlight(dvf) { background: rgba(255, 213, 79, 0.35); }
+::highlight(dvf-cur) { background: #ffd54f; color: #1a1a24; }
 
 /* image change preview */
 .imgdiff { display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
