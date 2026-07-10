@@ -1413,7 +1413,33 @@ function attachRowEvents(
   repo: RepoData,
   refsByHash: Map<string, RefInfo[]>
 ) {
-  row.addEventListener("click", () => selectNode(n));
+  row.addEventListener("click", () => {
+    // file-history split: clicking a graph commit keeps the file view open
+    // and syncs to the commit list instead of collapsing to the detail panel
+    if (histSplit && n.kind === "commit") {
+      const idx = histEntries.findIndex((h) => h.hash === n.id);
+      if (idx >= 0) {
+        openHistEntry(idx); // in the file's history -> full sync (list + diff)
+      } else {
+        // not a file-touching commit: still show it, keep the split
+        const t = cur();
+        if (!t) return;
+        t.selected = n.id;
+        $("hist-list").querySelectorAll("li.selected").forEach((x) => x.classList.remove("selected"));
+        histIdx = -1;
+        openDiff(
+          `${basename(histFile)} @ ${n.id.slice(0, 8)} — (file unchanged here)`,
+          t.repo.path,
+          histFile,
+          n.id,
+          true
+        );
+        paintViewport();
+      }
+      return;
+    }
+    selectNode(n);
+  });
 
   // drag & drop on the graph's branch badges -> merge / rebase
   row.querySelectorAll<HTMLElement>(".col-ref .badge[data-refname]").forEach((b) => {
@@ -1785,6 +1811,7 @@ async function showFileHistory() {
   }
   fileHistoryHL = new Set(hist.map((h) => h.hash));
   fileHistoryNum = new Map(hist.map((h) => [h.hash, { a: h.added, d: h.deleted }]));
+  histLineRange = null; // whole-file history, not a line range
   // back to the full graph; highlight applies there
   showDiffView(false);
   const t = cur();
@@ -1792,20 +1819,90 @@ async function showFileHistory() {
   renderHistPanel(file, hist);
 }
 
+// state for the file-history panel — used to click/arrow through commits and
+// show the file's diff at each one in the center view
+let histEntries: HistEntry[] = [];
+let histFile = "";
+let histIdx = -1;
+let histLineRange: { start: number; end: number } | null = null; // line-history label
+
+// line range covered by the current text selection inside the file view,
+// read from the data-ln attributes on the rows (diff / plain / blame)
+function selectedLineRange(): { start: number; end: number } | null {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const r = sel.getRangeAt(0);
+  const rowOf = (node: Node): HTMLElement | null => {
+    const el = node.nodeType === 1 ? (node as HTMLElement) : node.parentElement;
+    return el?.closest<HTMLElement>("[data-ln]") ?? null;
+  };
+  const a = rowOf(r.startContainer);
+  const b = rowOf(r.endContainer);
+  if (!a || !b) return null;
+  const la = +(a.dataset.ln ?? 0);
+  let lb = +(b.dataset.ln ?? 0);
+  // a selection ending exactly at the start of a row shouldn't include it
+  if (b !== a && r.endOffset === 0 && lb > la) lb -= 1;
+  if (!la || !lb) return null;
+  return { start: Math.min(la, lb), end: Math.max(la, lb) };
+}
+
+// history of just the selected lines (git log -L)
+async function showLineHistory(start: number, end: number) {
+  if (!diffCtx) return;
+  const { path, file, hash } = diffCtx;
+  setStatus(`loading history of lines ${start}–${end}…`);
+  let hist: HistEntry[];
+  try {
+    hist = await invoke("file_line_history", {
+      path,
+      file,
+      start,
+      end,
+      rev: hash ?? "",
+    });
+  } catch (e) {
+    errorModal("Line history failed:\n" + String(e));
+    return;
+  }
+  fileHistoryHL = new Set(hist.map((h) => h.hash));
+  fileHistoryNum = new Map(); // no per-commit line counts for a range
+  histLineRange = { start, end };
+  showDiffView(false);
+  const t = cur();
+  if (t) renderGraph(t);
+  renderHistPanel(file, hist);
+  setStatus(
+    hist.length
+      ? `${hist.length} commit(s) changed lines ${start}–${end}`
+      : `no commits changed lines ${start}–${end}`
+  );
+}
+
 // left-of-graph column listing every commit that touched the file; clicking
-// one jumps the graph to that commit and selects it
+// one shows that commit's diff of the file in the center (fast click-through)
 function renderHistPanel(file: string, hist: HistEntry[]) {
-  $("hist-title").innerHTML =
-    `📄 <b>${escapeHtml(basename(file))}</b> · ${hist.length}`;
-  ($("hist-title") as HTMLElement).title = file;
+  histEntries = hist;
+  histFile = file;
+  histIdx = -1;
+  const lr = histLineRange;
+  $("hist-title").innerHTML = lr
+    ? `📏 <b>${escapeHtml(basename(file))}</b> · L${lr.start}–${lr.end} · ${hist.length}`
+    : `📄 <b>${escapeHtml(basename(file))}</b> · ${hist.length}`;
+  ($("hist-title") as HTMLElement).title = lr
+    ? `${file} — history of lines ${lr.start}–${lr.end}`
+    : file;
   const ul = $("hist-list");
   ul.innerHTML = "";
   if (!hist.length) ul.innerHTML = "<li class='muted'>(no commits)</li>";
-  hist.forEach((h) => {
+  hist.forEach((h, i) => {
     const li = document.createElement("li");
     li.className = "hist-item";
-    const ns =
-      h.added < 0 || h.deleted < 0
+    li.dataset.idx = String(i);
+    // line-range history has no meaningful per-commit +/- counts
+    const ns = lr
+      ? ""
+      : h.added < 0 || h.deleted < 0
         ? `<span class="ns-bin">bin</span>`
         : `<span class="ns-add">+${h.added}</span><span class="ns-del">−${h.deleted}</span>`;
     li.innerHTML =
@@ -1815,18 +1912,71 @@ function renderHistPanel(file: string, hist: HistEntry[]) {
       `<span class="hi-author">${escapeHtml(h.author)}</span>` +
       `<span class="hi-date">${fmtDate(h.time)}</span></div>`;
     li.title = `${h.hash}\n${h.author} — ${fmtDate(h.time)}\n${h.summary}`;
-    li.addEventListener("click", () => {
-      const t = cur();
-      if (!t) return;
-      ul.querySelectorAll("li.selected").forEach((x) => x.classList.remove("selected"));
-      li.classList.add("selected");
-      const n = t.nodes.find((x) => x.id === h.hash);
-      if (n) selectNode(n, true); // select + scroll the graph to the commit
-      else setStatus(`commit ${h.hash.slice(0, 8)} not in the loaded graph`);
-    });
+    li.addEventListener("click", () => openHistEntry(i));
     ul.appendChild(li);
   });
   $("hist-panel").classList.remove("hidden");
+  // open the newest commit's diff right away so there's something to read
+  if (hist.length) openHistEntry(0);
+}
+
+// show the file's diff at history entry `i`; keeps the hist panel + graph
+// highlight, so you can keep clicking (or arrow) through commits fast
+function openHistEntry(i: number) {
+  const t = cur();
+  if (!t || i < 0 || i >= histEntries.length) return;
+  histIdx = i;
+  const h = histEntries[i];
+  const ul = $("hist-list");
+  ul.querySelectorAll("li.selected").forEach((x) => x.classList.remove("selected"));
+  const li = ul.querySelector<HTMLElement>(`li[data-idx="${i}"]`);
+  li?.classList.add("selected");
+  // I position both views myself below — stop the proportional link fighting
+  histScrollLock = true;
+  li?.scrollIntoView({ block: "nearest" });
+  t.selected = h.hash;
+  // diff of the file at this commit, shown BESIDE the graph (split=true)
+  openDiff(
+    `${basename(histFile)} @ ${h.hash.slice(0, 8)} — ${h.summary}`,
+    t.repo.path,
+    histFile,
+    h.hash,
+    true
+  );
+  // highlight + scroll the graph to the commit so both views stay in sync
+  paintViewport();
+  if (gctx && gctx.tab === t) {
+    const p = gctx.byId.get(h.hash);
+    const scrollEl = $("scroll");
+    if (p) scrollEl.scrollTop = Math.max(0, p.row * ROW_H - scrollEl.clientHeight / 2);
+  }
+  requestAnimationFrame(() => (histScrollLock = false)); // re-enable the link
+}
+
+// arrow through the file-history list (newer = up, older = down)
+function stepHistEntry(dir: 1 | -1) {
+  if (!histEntries.length) return;
+  const next = histIdx < 0 ? 0 : histIdx + dir;
+  if (next < 0 || next >= histEntries.length) return;
+  openHistEntry(next);
+}
+
+// proportional scroll link between the commit list and the graph (split mode)
+// so dragging one scrolls the other at the same relative rate
+let histScrollLock = false;
+function linkHistScroll() {
+  const list = $("hist-list");
+  const graph = $("scroll");
+  const sync = (from: HTMLElement, to: HTMLElement) => {
+    if (!histSplit || histScrollLock) return;
+    histScrollLock = true;
+    const fd = from.scrollHeight - from.clientHeight;
+    const td = to.scrollHeight - to.clientHeight;
+    if (fd > 0 && td > 0) to.scrollTop = (from.scrollTop / fd) * td;
+    requestAnimationFrame(() => (histScrollLock = false));
+  };
+  list.addEventListener("scroll", () => sync(list, graph));
+  graph.addEventListener("scroll", () => sync(graph, list));
 }
 
 function fileHistNumBadge(hash: string): string {
@@ -1841,10 +1991,19 @@ function fileHistNumBadge(hash: string): string {
 function clearFileHistory() {
   fileHistoryHL = null;
   fileHistoryNum = new Map();
+  histEntries = [];
+  histFile = "";
+  histIdx = -1;
+  histLineRange = null;
+  histSplit = false; // leave the split so the graph goes full-width again
   $("hist-filter").classList.add("hidden");
   $("hist-panel").classList.add("hidden");
+  setStatus(""); // drop any "loading history…" message
   const t = cur();
-  if (t) renderGraph(t);
+  if (t) {
+    showDiffView(false); // back to the graph
+    renderGraph(t);
+  }
 }
 
 // blame view: each line shows who/when; click a line to jump to that commit
@@ -1876,7 +2035,7 @@ async function showBlame() {
       // lines from the viewed commit (or uncommitted lines for WIP) = changes
       const isChange = hash ? bl.hash === hash : /^0+$/.test(bl.hash);
       return (
-        `<div class="bl${newGroup ? " bl-top" : ""}${isChange ? " bl-added" : ""}" data-hash="${bl.hash}" title="${escapeHtml(bl.summary)}">` +
+        `<div class="bl${newGroup ? " bl-top" : ""}${isChange ? " bl-added" : ""}" data-hash="${bl.hash}" data-ln="${i + 1}" title="${escapeHtml(bl.summary)}">` +
         `<span class="bl-ind"></span>` +
         `<span class="bl-meta">${escapeHtml(meta)}</span>` +
         `<span class="ln">${i + 1}</span>` +
@@ -2265,11 +2424,16 @@ async function refreshCommitFiles() {
 }
 
 // open a file diff in the MAIN center area (line numbers + highlighting)
+// split mode: keep the graph visible NEXT to the diff (file-history browsing)
+let histSplit = false;
 function showDiffView(on: boolean) {
   $("mergeview").classList.add("hidden");
   $("diffview").classList.toggle("hidden", !on);
-  $("col-headers").classList.toggle("hidden", on);
-  $("scroll").classList.toggle("hidden", on);
+  const split = on && histSplit;
+  $("graphpane").classList.toggle("hist-split", split);
+  // in split mode the graph + headers stay visible beside the diff
+  $("col-headers").classList.toggle("hidden", on && !split);
+  $("scroll").classList.toggle("hidden", on && !split);
   dvfClose(); // view content changes — stale find results would mislead
 }
 function showMergeView(on: boolean) {
@@ -2771,7 +2935,12 @@ async function togglePlainView() {
     // ONLY the code, never the numbers
     body.innerHTML =
       `<div class="plainview">` +
-      lines.map((l) => `<div class="pl"><span class="plc">${hlLine(l, lang) || "&nbsp;"}</span></div>`).join("") +
+      lines
+        .map(
+          (l, i) =>
+            `<div class="pl" data-ln="${i + 1}"><span class="plc">${hlLine(l, lang) || "&nbsp;"}</span></div>`
+        )
+        .join("") +
       `</div>`;
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
@@ -2886,14 +3055,19 @@ function dvfPaintMinimap() {
   }
 }
 
+let diffFull = false; // commit diff view: false = hunks only, true = whole file
+
 async function openDiff(
   title: string,
   path: string,
   file: string,
-  hash: string | null
+  hash: string | null,
+  split = false // keep the graph visible beside the diff (file-history mode)
 ) {
+  histSplit = split;
   diffCtx = { path, file, hash };
-  lastView = () => openDiff(title, path, file, hash);
+  wipDiffCtx = null; // this is a commit/compare diff, not the WIP staging view
+  lastView = () => openDiff(title, path, file, hash, split);
   setBlameBtn(false);
   setPlainBtn(false);
   setPickButtons(!!hash && !isImage(file));
@@ -2907,9 +3081,15 @@ async function openDiff(
   showDiffView(true);
   try {
     const diff = hash
-      ? await invoke<string>("commit_diff", { path, hash, file })
+      ? await invoke<string>("commit_diff", { path, hash, file, full: diffFull })
       : await invoke<string>("wip_diff", { path, file });
     showDiffText(title, diff);
+    if (hash) {
+      // toggle between changed hunks and the whole file
+      const wb = $("diffview-whole");
+      wb.classList.remove("hidden");
+      wb.textContent = diffFull ? "Hunks only" : "Whole file";
+    }
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
     $("diff-minimap").innerHTML = "";
@@ -4891,9 +5071,16 @@ function renderUnifiedDiff(diff: string): string {
   let oldN = 0;
   let newN = 0;
   const rows: string[] = [];
-  const row = (cls: string, ln1: string, ln2: string, codeHtml: string) =>
-    `<div class="dl ${cls}"><span class="ln">${ln1}</span>` +
-    `<span class="ln">${ln2}</span><span class="dc">${codeHtml}</span></div>`;
+  // data-ln = the file line this row maps to (new side; old side for pure
+  // deletions) — used by "history of selected lines"
+  const row = (cls: string, ln1: string, ln2: string, codeHtml: string) => {
+    const ln = ln2 || ln1;
+    const attr = ln ? ` data-ln="${ln}"` : "";
+    return (
+      `<div class="dl ${cls}"${attr}><span class="ln">${ln1}</span>` +
+      `<span class="ln">${ln2}</span><span class="dc">${codeHtml}</span></div>`
+    );
+  };
 
   // buffered consecutive removals/additions, flushed as a paired block.
   // Paired lines keep the character-level change highlight (no syntax there);
@@ -4989,11 +5176,36 @@ window.addEventListener("DOMContentLoaded", () => {
   $("diffview-picklines").addEventListener("click", toggleCherryPickLines);
   $("diffview-plain").addEventListener("click", () => void togglePlainView());
   $("diffview-copy").addEventListener("click", () => void copyPlainFile());
+  // right-click a text selection in the file view -> history of those lines
+  $("diffview-body").addEventListener("contextmenu", (e) => {
+    if (!diffCtx) return;
+    const range = selectedLineRange();
+    if (!range) return; // no selection -> let the native menu (copy) show
+    e.preventDefault();
+    const label =
+      range.start === range.end
+        ? `History of line ${range.start}`
+        : `History of lines ${range.start}–${range.end}`;
+    const sel = window.getSelection()?.toString() ?? "";
+    showMenu(e.clientX, e.clientY, [
+      { label, action: () => void showLineHistory(range.start, range.end) },
+      { separator: true },
+      { label: "Copy", action: () => void navigator.clipboard.writeText(sel).catch(() => {}) },
+    ]);
+  });
   $("diffview-whole").addEventListener("click", () => {
-    const c = wipDiffCtx;
-    if (!c) return;
-    wipFull = !wipFull;
-    void openWipDiff(c.path, c.file, c.staged);
+    const scroll = $("diffview-body").scrollTop;
+    const restore = () => ($("diffview-body").scrollTop = scroll);
+    if (wipDiffCtx) {
+      const c = wipDiffCtx;
+      wipFull = !wipFull;
+      void openWipDiff(c.path, c.file, c.staged).then(restore);
+    } else if (diffCtx?.hash) {
+      const { path, file, hash } = diffCtx;
+      const title = $("diffview-title").textContent ?? file;
+      diffFull = !diffFull;
+      void openDiff(title, path, file, hash, histSplit).then(restore);
+    }
   });
   // find-in-file bar
   $("dvf-input").addEventListener("input", (e) =>
@@ -5007,6 +5219,21 @@ window.addEventListener("DOMContentLoaded", () => {
   $("dvf-prev").addEventListener("click", () => dvfStep(-1));
   $("dvf-next").addEventListener("click", () => dvfStep(1));
   $("dvf-close").addEventListener("click", dvfClose);
+  // arrow through file history (when its panel is open) to flip through the
+  // file's diff at each commit fast — ignore while typing in an input
+  window.addEventListener("keydown", (e) => {
+    if ($("hist-panel").classList.contains("hidden")) return;
+    const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      stepHistEntry(1); // older
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      stepHistEntry(-1); // newer
+    }
+  });
+  linkHistScroll(); // list <-> graph proportional scroll in file-history split
   // clicking the sidebar or empty graph space resets the branch highlight
   $("sidebar").addEventListener("click", clearGraphHighlight);
   $("hist-panel").addEventListener("click", (e) => {

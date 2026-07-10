@@ -107,10 +107,60 @@ fn load_submodules(path: &str) -> Vec<Submodule> {
 const US: char = '\u{1f}'; // field
 const RS: char = '\u{1e}'; // record
 
+// git C-quotes unusual paths in its output ("a b\"c".., octal for non-ASCII).
+// Undo it so pathspecs we send back actually match files.
+fn unquote_git_path(s: &str) -> String {
+    let s = s.trim();
+    if !(s.len() >= 2 && s.starts_with('"') && s.ends_with('"')) {
+        return s.to_string();
+    }
+    let b = s[1..s.len() - 1].as_bytes();
+    let mut out = Vec::<u8>::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            let c = b[i + 1];
+            match c {
+                b'"' | b'\\' => {
+                    out.push(c);
+                    i += 2;
+                }
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                }
+                b'0'..=b'7' => {
+                    let mut v = 0u32;
+                    let mut k = 0;
+                    while k < 3 && i + 1 + k < b.len() && (b'0'..=b'7').contains(&b[i + 1 + k]) {
+                        v = v * 8 + (b[i + 1 + k] - b'0') as u32;
+                        k += 1;
+                    }
+                    out.push(v as u8);
+                    i += 1 + k;
+                }
+                _ => {
+                    out.push(c);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 // Run `git` in `repo` with args. On Windows, suppress the console window.
+// core.quotepath=false keeps non-ASCII paths raw UTF-8 instead of octal soup.
 fn git(repo: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(args);
+    cmd.arg("-C").arg(repo).args(["-c", "core.quotepath=false"]).args(args);
 
     #[cfg(windows)]
     {
@@ -144,6 +194,7 @@ fn git_stdin(repo: &str, args: &[&str], input: &str) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .arg("-")
         .stdin(Stdio::piped())
@@ -183,6 +234,7 @@ fn git_no_editor(repo: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true");
@@ -303,7 +355,7 @@ fn load_conflict(path: &str) -> ConflictState {
     };
 
     let files: Vec<String> = git(path, &["diff", "--name-only", "--diff-filter=U"])
-        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .map(|s| s.lines().map(unquote_git_path).collect())
         .unwrap_or_default();
 
     // unmerged files without a merge/rebase/… in progress: a conflicted
@@ -677,7 +729,7 @@ async fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, Str
         let mut it = line.split('\t');
         let status = it.next().unwrap_or("").to_string();
         // rename rows have two paths; take the last (new) one.
-        let path_part = it.last().unwrap_or("").to_string();
+        let path_part = unquote_git_path(it.last().unwrap_or(""));
         if path_part.is_empty() {
             continue;
         }
@@ -690,15 +742,21 @@ async fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, Str
 }
 
 #[tauri::command]
-async fn commit_diff(path: String, hash: String, file: String) -> Result<String, String> {
-    // -U100000 => effectively full-file context (whole file shown, not just hunks)
+async fn commit_diff(
+    path: String,
+    hash: String,
+    file: String,
+    full: Option<bool>,
+) -> Result<String, String> {
+    // hunks only (-U3) by default; -U100000 shows the whole file as context
+    let ctx = if full.unwrap_or(false) { "-U100000" } else { "-U3" };
     git(
         &path,
         &[
             "show",
             "--format=",
             "--first-parent",
-            "-U100000",
+            ctx,
             "-M",
             &hash,
             "--",
@@ -728,7 +786,7 @@ async fn wip_status(path: String) -> Result<WipFiles, String> {
         let x = bytes[0] as char; // index / staged
         let y = bytes[1] as char; // worktree / unstaged
         let rest = line[3..].trim();
-        let p = rest.rsplit(" -> ").next().unwrap_or(rest).to_string();
+        let p = unquote_git_path(rest.rsplit(" -> ").next().unwrap_or(rest));
 
         if x == '?' && y == '?' {
             unstaged.push(FileChange {
@@ -805,7 +863,7 @@ async fn wip_files(path: String) -> Result<Vec<FileChange>, String> {
         let code = &line[..2];
         let rest = line[3..].trim();
         // renames look like "old -> new"; keep the new path.
-        let p = rest.rsplit(" -> ").next().unwrap_or(rest).to_string();
+        let p = unquote_git_path(rest.rsplit(" -> ").next().unwrap_or(rest));
         let status = if code == "??" {
             "?".to_string()
         } else {
@@ -1592,6 +1650,49 @@ async fn file_history(path: String, file: String) -> Result<Vec<HistEntry>, Stri
     Ok(out)
 }
 
+// history of a LINE RANGE — only commits that changed lines start..=end of the
+// file (git log -L). `rev` anchors which version the line numbers refer to
+// (a commit hash, or empty for HEAD/worktree). added/deleted left at 0.
+#[tauri::command]
+async fn file_line_history(
+    path: String,
+    file: String,
+    start: u32,
+    end: u32,
+    rev: String,
+) -> Result<Vec<HistEntry>, String> {
+    let range = format!("{start},{end}:{file}");
+    let fmt = format!("%H{US}%an{US}%ct{US}%s");
+    let mut args = vec![
+        "log".to_string(),
+        "-L".to_string(),
+        range,
+        "--no-patch".to_string(),
+        format!("--pretty=format:{fmt}"),
+    ];
+    if !rev.trim().is_empty() {
+        args.push(rev);
+    }
+    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let raw = git(&path, &argrefs)?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let f: Vec<&str> = line.split(US).collect();
+        if f.len() < 4 {
+            continue;
+        }
+        out.push(HistEntry {
+            hash: f[0].to_string(),
+            author: f[1].to_string(),
+            time: f[2].trim().parse().unwrap_or(0),
+            summary: f[3].to_string(),
+            added: 0,
+            deleted: 0,
+        });
+    }
+    Ok(out)
+}
+
 // per-line blame for a file (at a commit, or working tree if hash empty)
 #[tauri::command]
 async fn blame(path: String, hash: String, file: String) -> Result<Vec<BlameLine>, String> {
@@ -1695,7 +1796,7 @@ async fn commit_numstat(path: String, hash: String) -> Result<Vec<NumStat>, Stri
             continue;
         }
         out.push(NumStat {
-            path: p.rsplit(" => ").next().unwrap_or(p).trim_end_matches('}').to_string(),
+            path: unquote_git_path(p.rsplit(" => ").next().unwrap_or(p).trim_end_matches('}')),
             added: a.parse().unwrap_or(-1),
             deleted: d.parse().unwrap_or(-1),
         });
@@ -1715,7 +1816,7 @@ async fn compare_files(path: String, hash: String) -> Result<Vec<FileChange>, St
         }
         let mut it = line.split('\t');
         let status = it.next().unwrap_or("").to_string();
-        let p = it.last().unwrap_or("").to_string();
+        let p = unquote_git_path(it.last().unwrap_or(""));
         if !p.is_empty() {
             files.push(FileChange { status, path: p });
         }
@@ -1802,7 +1903,8 @@ pub fn run() {
             commit_numstat,
             file_at_commit,
             blame,
-            file_history
+            file_history,
+            file_line_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

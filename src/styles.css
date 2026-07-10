@@ -598,6 +598,14 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   min-width: 0;
   background: var(--bg);
 }
+/* file-history split: graph on the left, the file's diff on the right */
+#graphpane.hist-split { flex-direction: row; }
+#graphpane.hist-split > #scroll { flex: 1 1 44%; min-width: 0; }
+#graphpane.hist-split > #diffview {
+  flex: 1 1 56%;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+}
 #col-headers {
   display: flex;
   flex: 0 0 auto;
