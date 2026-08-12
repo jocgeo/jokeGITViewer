@@ -372,8 +372,11 @@ fn load_conflict(path: &str) -> ConflictState {
 fn load_refs(repo: &str) -> Result<Vec<RefInfo>, String> {
     // committerdate works for branches + lightweight tags; taggerdate covers
     // annotated tags. We pick whichever is present.
+    // %(*objectname) is the peeled commit — set only for annotated tags, where
+    // %(objectname) is the tag object itself and matches no commit in the graph.
     let fmt = format!(
-        "%(refname){US}%(objectname){US}%(HEAD){US}%(committerdate:unix){US}%(taggerdate:unix)"
+        "%(refname){US}%(objectname){US}%(HEAD){US}%(committerdate:unix){US}\
+         %(taggerdate:unix){US}%(*objectname)"
     );
     let raw = git(
         repo,
@@ -394,7 +397,11 @@ fn load_refs(repo: &str) -> Result<Vec<RefInfo>, String> {
             continue;
         }
         let full = parts[0].to_string();
-        let target = parts[1].to_string();
+        // annotated tag -> peeled commit; everything else -> the object itself
+        let target = match parts.get(5).map(|s| s.trim()) {
+            Some(peeled) if !peeled.is_empty() => peeled.to_string(),
+            _ => parts[1].to_string(),
+        };
         let is_head = parts[2] == "*";
         let time = parts[3]
             .trim()
