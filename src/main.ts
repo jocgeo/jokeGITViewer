@@ -4048,16 +4048,24 @@ function buildMinimap() {
   map.innerHTML = "";
   const rows = body.children;
   const total = rows.length;
+  const contentH = body.scrollHeight || 1;
   if (!total) return;
   for (let i = 0; i < total; i++) {
-    const cls = rows[i].classList;
-    const kind = cls.contains("add") ? "add" : cls.contains("del") ? "del" : "";
+    const el = rows[i] as HTMLElement;
+    const kind = el.classList.contains("add")
+      ? "add"
+      : el.classList.contains("del")
+        ? "del"
+        : "";
     if (!kind) continue;
+    // position by the row's REAL pixel offset, not its index — hunk headers
+    // and other rows aren't uniform height, so index fractions drift
+    const top = el.offsetTop;
     const mark = document.createElement("div");
     mark.className = `mm ${kind}`;
-    mark.style.top = `${(i / total) * 100}%`;
+    mark.style.top = `${(top / contentH) * 100}%`;
     mark.addEventListener("click", () => {
-      body.scrollTop = (i / total) * body.scrollHeight - body.clientHeight / 2;
+      body.scrollTop = top - body.clientHeight / 2;
     });
     map.appendChild(mark);
   }
@@ -5335,6 +5343,20 @@ window.addEventListener("keydown", (e) => {
     if (!$("diffview").classList.contains("hidden")) dvfOpen();
     else openSearch();
   }
+});
+// Ctrl/Cmd+A in the file view selects ONLY the file content, not the whole UI
+window.addEventListener("keydown", (e) => {
+  if (!((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a")) return;
+  if ($("diffview").classList.contains("hidden")) return; // no file open
+  const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+  if (tag === "input" || tag === "textarea") return; // let inputs select their text
+  e.preventDefault();
+  const sel = window.getSelection();
+  if (!sel) return;
+  const r = document.createRange();
+  r.selectNodeContents($("diffview-body"));
+  sel.removeAllRanges();
+  sel.addRange(r);
 });
 window.addEventListener("scroll", closeMenu, true);
 window.addEventListener("keydown", (e) => {

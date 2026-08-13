@@ -772,6 +772,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   position: relative;
 }
 #diffview-body {
+  position: relative; /* so row offsetTop maps to the minimap accurately */
   flex: 1 1 auto;
   overflow: auto;
   font-family: Consolas, monospace;
@@ -996,6 +997,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   z-index: 3;
 }
 .dl.hunk .dc, .dl.meta .dc { color: var(--muted); }
+/* diff header + @@ hunk rows are UI chrome — don't include them when copying */
+.dl.meta, .dl.hunk { user-select: none; }
 /* per-hunk stage/discard buttons on the @@ bars */
 .hunk-btns { margin-left: auto; display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
 .hunk-stage { border-color: #2ea043; color: #7ee787; }
