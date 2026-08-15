@@ -130,9 +130,13 @@
         <main id="graphpane">
           <div id="scroll">
             <div id="col-headers">
-              <div class="ch ch-ref">Branch / Tag</div>
-              <div class="ch ch-graph">Graph</div>
-              <div class="ch ch-msg">Commit message</div>
+              <div class="ch ch-graph">
+                <span class="ch-lbl">Graph</span>
+                <div id="graph-hbar" class="hidden" title="Scroll the graph sideways (shift+wheel over the graph)">
+                  <div id="graph-hthumb"></div>
+                </div>
+              </div>
+              <div class="ch ch-msg">Branch / Tag &middot; Commit message</div>
             </div>
             <div id="graph-content">
               <svg id="graph-svg"></svg>
@@ -151,6 +155,8 @@
                 <button id="dvf-close" class="mini" title="Close (Esc)">✕</button>
               </span>
               <span class="dv-btns">
+                <button id="diffview-save" class="mini hidden" title="Save changes to the file in the working tree (Ctrl+S)">💾 Save</button>
+                <button id="diffview-modify" class="mini" title="Edit this file and save it to the working tree">Modify</button>
                 <button id="diffview-whole" class="mini hidden" title="Toggle between changed hunks only and the whole file">Whole file</button>
                 <button id="diffview-copy" class="mini hidden" title="Copy the whole file content to the clipboard">⧉ Copy</button>
                 <button id="diffview-plain" class="mini" title="Show the file as it is (no diff markers) — selectable for copying">Plain</button>
@@ -248,6 +254,7 @@
 
           <div id="detail-body" class="hidden">
             <div id="d-summary" class="d-summary"></div>
+            <div id="d-body" class="d-body hidden"></div>
             <div id="d-meta" class="d-meta"></div>
             <div class="d-title d-files-head">
               <span id="d-files-label">Changed files</span>

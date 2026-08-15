@@ -546,7 +546,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* simple line icons */
 .ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; flex: 0 0 auto; pointer-events: none; }
 /* let drag initiate on the draggable badge/li, not on inner icons/text */
-.col-ref .badge > *, .reflist li .ricon, .reflist li .dot, .reflist li .rname, .reflist li .here, .reflist li .dl { pointer-events: none; }
+.col-msg .badge > *, .reflist li .ricon, .reflist li .dot, .reflist li .rname, .reflist li .here, .reflist li .dl { pointer-events: none; }
 .side-head .ic, .reflist .ricon .ic { color: var(--muted); }
 .badge .ic { width: 12px; height: 12px; margin-right: 3px; }
 .reflist .rname { overflow: hidden; text-overflow: ellipsis; }
@@ -621,8 +621,38 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   color: var(--muted);
 }
 .ch { display: flex; align-items: center; padding: 0 12px; }
-.ch-ref { width: 280px; flex: 0 0 auto; border-right: 1px solid var(--border); }
-.ch-graph { flex: 0 0 auto; border-right: 1px solid var(--border); }
+/* the graph column can be as narrow as ~30px on linear repos — clip the label
+   instead of letting it spill into the message column */
+.ch-graph {
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 0 6px;
+  position: relative;
+}
+.ch-graph .ch-lbl { overflow: hidden; text-overflow: ellipsis; }
+/* slim horizontal scrollbar for the graph lanes (only when they overflow) */
+#graph-hbar {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 2px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+}
+#graph-hbar.hidden { display: none; }
+#graph-hthumb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  background: var(--muted);
+  opacity: 0.55;
+}
+#graph-hbar:hover #graph-hthumb { opacity: 0.9; }
 .ch-msg { flex: 1 1 auto; }
 
 #scroll {
@@ -633,7 +663,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #graph-content { position: relative; }
 #graph-svg {
   position: absolute;
-  top: 0; left: 280px; /* overridden by JS to REF_W */
+  top: 0; left: 0; /* graph is the leftmost column */
   pointer-events: none;
   z-index: 5; /* keep nodes/edges above the row highlight */
 }
@@ -652,19 +682,19 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
-.crow.dim .col-msg, .crow.dim .col-ref { opacity: .4; } /* not in selected lineage */
-.crow.dim-mid .col-msg, .crow.dim-mid .col-ref { opacity: .75; } /* ancestor that led here */
+.crow.dim .col-msg { opacity: .4; }      /* not in selected lineage */
+.crow.dim-mid .col-msg { opacity: .75; }  /* ancestor that led here */
 
-.col-ref {
-  width: 280px;
-  flex: 0 0 auto;
-  display: flex;
+/* ref pills now sit inline, directly before the commit message. Capped width
+   so a long branch name can never crowd out the message text. */
+.col-msg .refs {
+  flex: 0 1 auto;
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 4px;
-  padding: 0 8px;
+  max-width: 45%;
   overflow: hidden;
-  border-right: 1px solid rgba(255,255,255,0.05);
+  margin-right: 8px;
 }
 .col-graph {
   flex: 0 0 auto;
@@ -678,20 +708,47 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   align-items: center;
   padding: 0 12px;
 }
+/* hierarchy: the message is the content, everything else is metadata */
 .col-msg .summary {
   flex: 1 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--fg);
 }
-.col-msg .author { color: var(--muted); margin: 0 12px; flex: 0 0 auto; }
-.col-msg .date { color: var(--muted); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-.col-msg .hash { color: var(--muted); margin-left: 12px; font-family: Consolas, monospace; flex: 0 0 auto; }
-.col-ref .badge {
-  max-width: 260px;
+.col-msg .author {
+  color: var(--muted);
+  margin: 0 12px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* identicon lives here now — small, next to the name it identifies */
+.col-msg .author .av {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.col-msg .date { color: var(--muted); flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: 0.8; }
+.col-msg .hash {
+  color: var(--muted);
+  margin-left: 12px;
+  font-family: Consolas, monospace;
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+.col-msg .refs .badge {
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-right: 0; /* .refs handles the gap */
 }
 
 .badge {
@@ -704,13 +761,20 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   flex: 0 0 auto;
   user-select: none;
 }
-.col-ref .badge[data-refkind="local"] { cursor: grab; }
+.col-msg .badge[data-refkind="local"] { cursor: grab; }
 .badge.drop-target { outline: 1px dashed var(--accent); outline-offset: 1px; background: var(--sel); }
-.badge.local { background: #2a3b55; color: #9cc4ff; }
-.badge.remote { background: #3b2a4d; color: #d6a8ff; }
-.badge.tag { background: #4d3f2a; color: #ffcf8f; }
-.badge.head { background: #ffffff; color: #0a0a12; font-weight: 700; }
-.badge.current { outline: 1px solid var(--accent); font-weight: 700; }
+/* muted badge fills — refs are labels, not the main content. The CURRENT
+   branch is the one that gets to be bright. */
+.badge.local { background: #24313f; color: #8fb3d9; border-color: #33455a; }
+.badge.remote { background: #2f2739; color: #b79bd0; border-color: #443859; }
+.badge.tag { background: #3b3226; color: #d9b783; border-color: #55452f; }
+.badge.head { background: #e8e8ef; color: #0a0a12; font-weight: 700; }
+.badge.current {
+  background: #2f4460;
+  color: #cfe4ff;
+  outline: 1px solid var(--accent);
+  font-weight: 700;
+}
 .bcheck { color: #7ee787; font-weight: 700; margin-right: 2px; }
 .tagpush { margin-left: 3px; color: #e3b341; font-weight: 700; } /* local-only tag */
 /* "which branch" hint — outlined faint label, readable on any row bg */
@@ -923,7 +987,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 /* fixed row metrics: all three resolver panes must agree pixel-exactly for
    the side-by-side alignment (padded conflict blocks) to hold up */
-.ml { display: flex; height: 18px; line-height: 18px; overflow: hidden; }
+/* width:max-content lets rows grow past the pane (enables horizontal scroll);
+   min-width:100% keeps the row background full-width for short lines */
+.ml { display: flex; height: 18px; line-height: 18px; width: max-content; min-width: 100%; }
 .ml.pad {
   background: repeating-linear-gradient(45deg, transparent, transparent 5px,
     rgba(255, 255, 255, 0.03) 5px, rgba(255, 255, 255, 0.03) 10px);
@@ -937,7 +1003,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   user-select: none;
   border-right: 1px solid var(--border);
 }
-.ml .dc { flex: 1 1 auto; padding: 0 10px; white-space: pre; }
+.ml .dc { flex: 0 0 auto; padding: 0 10px; white-space: pre; }
 .ml.ours { background: rgba(56, 139, 253, 0.16); }   /* ours = blue */
 .ml.ours .dc { color: #9cc4ff; }
 .ml.theirs { background: rgba(188, 140, 255, 0.16); } /* theirs = purple */
@@ -1101,6 +1167,48 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   user-select: text;
   cursor: text;
 }
+
+/* Edit mode: a syntax-highlighted <pre> sits behind a transparent textarea.
+   BOTH layers must share identical font metrics, padding and wrapping or the
+   caret drifts away from the rendered text. */
+#dv-editwrap { position: relative; width: 100%; height: 100%; }
+#dv-edithl,
+#dv-edit {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 8px 12px;
+  border: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  word-wrap: normal;
+  tab-size: 4;
+  overflow: auto;
+}
+#dv-edithl {
+  background: var(--bg);
+  color: var(--fg);
+  pointer-events: none; /* clicks belong to the textarea */
+  overflow: hidden;     /* scrolled programmatically to match the textarea */
+  z-index: 0;
+}
+#dv-edit {
+  z-index: 1;
+  resize: none;
+  outline: none;
+  background: transparent;
+  color: transparent;      /* the highlighted layer shows the text */
+  caret-color: var(--fg);  /* but the caret must stay visible */
+}
+#dv-edit::selection { background: rgba(56, 139, 253, 0.4); color: transparent; }
+/* fallback when highlighting is off (unknown language / very large file) */
+#dv-edit.plaintext { color: var(--fg); background: var(--bg); }
+#dv-edit.plaintext::selection { color: var(--fg); }
+#diffview-save { border-color: #2ea043; color: #7ee787; font-weight: 600; }
+#diffview-save:hover { background: rgba(46, 160, 67, 0.2); }
 
 /* find-in-file bar + match marks */
 #dv-find { display: flex; align-items: center; gap: 6px; }
@@ -1283,6 +1391,23 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #detail-close:hover { color: var(--fg); background: var(--bg3); }
 .d-summary { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+/* commit message body (the description under the subject) */
+.d-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg);
+  opacity: 0.85;
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  border-left: 2px solid var(--border);
+  border-radius: 0 5px 5px 0;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.d-body.hidden { display: none; }
 .d-meta { color: var(--muted); font-size: 12px; margin-bottom: 14px; line-height: 1.6; }
 .d-meta code { font-family: Consolas, monospace; color: var(--fg); }
 .d-title {

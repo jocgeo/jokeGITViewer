@@ -156,103 +156,150 @@ fn unquote_git_path(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+// Another process (or another git of ours) is holding a .lock right now.
+// The command did nothing, so retrying after a moment is safe.
+fn is_lock_busy(e: &str) -> bool {
+    (e.contains(".lock") && (e.contains("File exists") || e.contains("Unable to create")))
+        || e.contains("Another git process seems to be running")
+        || e.contains("Unable to create") && e.contains("index.lock")
+}
+
+// Retry a git invocation while a lock is held elsewhere. Total wait ≈ 1.5s,
+// which comfortably outlasts the brief locks other git tools take.
+fn with_lock_retry<F>(mut run: F) -> Result<String, String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let mut delay = std::time::Duration::from_millis(60);
+    for attempt in 0..6 {
+        match run() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt == 5 || !is_lock_busy(&e) {
+                    return Err(e);
+                }
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+        }
+    }
+    unreachable!()
+}
+
 // Run `git` in `repo` with args. On Windows, suppress the console window.
 // core.quotepath=false keeps non-ASCII paths raw UTF-8 instead of octal soup.
+//
+// GIT_OPTIONAL_LOCKS=0 is the important one: it stops read-only commands from
+// taking index.lock as a side effect (`git status` normally re-writes the index
+// stat cache). The 1.5s status poll would otherwise fight every other git tool
+// open on the same repo. Required locks — checkout, commit, add — are
+// unaffected, so writes still behave exactly as before.
 fn git(repo: &str, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(["-c", "core.quotepath=false"]).args(args);
+    with_lock_retry(|| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(repo)
+            .args(["-c", "core.quotepath=false"])
+            .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0");
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
 
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        // some git messages are printed to stdout, not stderr
-        let msg = if err.is_empty() {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        } else {
-            err.to_string()
-        };
-        return Err(format!("git {:?} failed: {msg}", args));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let err = err.trim();
+            // some git messages are printed to stdout, not stderr
+            let msg = if err.is_empty() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                err.to_string()
+            };
+            return Err(format!("git {:?} failed: {msg}", args));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
 }
 
 // like git(), but pipes `input` to git's stdin (e.g. `apply --cached -`)
 fn git_stdin(repo: &str, args: &[&str], input: &str) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(repo)
-        .args(["-c", "core.quotepath=false"])
-        .args(args)
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    with_lock_retry(|| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(repo)
+            .args(["-c", "core.quotepath=false"])
+            .args(args)
+            .arg("-")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to run git: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("no stdin")?
-        .write_all(input.as_bytes())
-        .map_err(|e| e.to_string())?; // stdin drops here -> pipe closes
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        let msg = if err.is_empty() {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        } else {
-            err.to_string()
-        };
-        return Err(format!("git {:?} failed: {msg}", args));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut child = cmd.spawn().map_err(|e| format!("failed to run git: {e}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or("no stdin")?
+            .write_all(input.as_bytes())
+            .map_err(|e| e.to_string())?; // stdin drops here -> pipe closes
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let err = err.trim();
+            let msg = if err.is_empty() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                err.to_string()
+            };
+            return Err(format!("git {:?} failed: {msg}", args));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
 }
 
 // like git(), but with no interactive editor (for --continue style commands)
 fn git_no_editor(repo: &str, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(repo)
-        .args(["-c", "core.quotepath=false"])
-        .args(args)
-        .env("GIT_EDITOR", "true")
-        .env("GIT_SEQUENCE_EDITOR", "true");
+    with_lock_retry(|| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(repo)
+            .args(["-c", "core.quotepath=false"])
+            .args(args)
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true");
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
 }
 
 // like git(), but returns raw stdout bytes (for binary blobs)
@@ -1130,6 +1177,45 @@ async fn clone_repo(url: String, dest: String) -> Result<String, String> {
     Ok(target)
 }
 
+// Write edited content to the file in the WORKING TREE (never stages it — the
+// change shows up as a normal unstaged edit the user reviews and commits).
+#[tauri::command]
+async fn write_file_worktree(path: String, file: String, content: String) -> Result<(), String> {
+    let full = format!("{path}/{file}");
+    // keep the file's existing line endings instead of forcing LF
+    let crlf = std::fs::read_to_string(&full)
+        .map(|s| s.contains("\r\n"))
+        .unwrap_or(false);
+    let body = if crlf {
+        content.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        content.replace("\r\n", "\n")
+    };
+    std::fs::write(&full, body).map_err(|e| e.to_string())
+}
+
+// Full commit message body (everything after the subject line). Fetched on
+// demand — putting %b in the bulk log format would bloat every commit record.
+#[tauri::command]
+async fn commit_body(path: String, hash: String) -> Result<String, String> {
+    git(&path, &["show", "-s", "--format=%b", &hash]).map(|s| s.trim_end().to_string())
+}
+
+// Cheap change-stamp for ONE file (mtime + size). The repo fingerprint is
+// status-based, so editing an already-modified file doesn't move it — the
+// status line stays " M file". The open file view polls this instead.
+#[tauri::command]
+async fn file_stamp(path: String, file: String) -> Result<String, String> {
+    let md = std::fs::metadata(format!("{path}/{file}")).map_err(|e| e.to_string())?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Ok(format!("{mtime}:{}", md.len()))
+}
+
 // current working-tree content of one file (for the cherry-pick split view)
 #[tauri::command]
 async fn file_worktree(path: String, file: String) -> Result<String, String> {
@@ -1243,7 +1329,18 @@ async fn checkout(path: String, target: String, upstream: Option<String>) -> Res
         stashed = true;
     }
 
-    match upstream {
+    // --ignore-other-worktrees: by default git refuses to check out a branch
+    // that another linked worktree holds. We always allow it — a branch behaves
+    // like any other ref here. (Committing then leaves the other worktree's
+    // HEAD stale until it checks out again.)
+    let base: [&str; 2] = ["checkout", "--ignore-other-worktrees"];
+    let run = |extra: &[&str]| -> Result<String, String> {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        git(&path, &args)
+    };
+
+    match &upstream {
         Some(up) => {
             let exists = git(
                 &path,
@@ -1251,15 +1348,15 @@ async fn checkout(path: String, target: String, upstream: Option<String>) -> Res
             )
             .is_ok();
             if exists {
-                git(&path, &["checkout", &target])?;
+                run(&[&target])?;
                 // best-effort: bring the local branch up to the remote tip
-                let _ = git(&path, &["merge", "--ff-only", &up]);
+                let _ = git(&path, &["merge", "--ff-only", up]);
             } else {
-                git(&path, &["checkout", "-b", &target, "--track", &up])?;
+                run(&["-b", &target, "--track", up])?;
             }
         }
         None => {
-            git(&path, &["checkout", &target])?;
+            run(&[&target])?;
         }
     }
     Ok(stashed)
@@ -1858,6 +1955,9 @@ pub fn run() {
             remove_last_line_if,
             move_line,
             file_worktree,
+            write_file_worktree,
+            file_stamp,
+            commit_body,
             diff_worktree_to_commit,
             clone_repo,
             chat_pull,

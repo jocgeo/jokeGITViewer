@@ -201,21 +201,27 @@ interface Tab {
 
 // ---- layout constants ----
 const ROW_H = 30;
-const LANE_W = 22;
-const PAD = 16;
+const PAD = 14;
+// Comfortable fixed lane geometry — nodes fill ~50% of their lane so the
+// connecting lines stay traceable. Lanes are NEVER compressed: when a repo has
+// more branches than fit, the graph column scrolls sideways on its own instead
+// (see graphPanX), leaving the commit messages exactly where they are.
+const LANE_W = 20;
 const NODE_R = 5;
-const AVATAR = 18; // author avatar size drawn on commit nodes
-const REF_W = 280; // width of the left "Branch / Tag" column
+const GRAPH_VIEW_MAX = 340; // widest the graph column gets before it scrolls
+
+let graphPanX = 0; // horizontal scroll offset inside the graph column
 const WIP_ID = "__WIP__";
 const STASH_COLOR = "#e3b341";
 const WIP_COLOR = "#ff9d5c";
-// per-branch-line colors — wider palette since every branch gets its own
-// (neighboring chains cycle through it, so adjacent lines stay distinct)
+// per-branch-line colors. Deliberately DESATURATED: hue alone separates the
+// branches, while the muted tone keeps the graph from shouting over the
+// commit messages (bright saturated lanes make everything feel equally loud).
 const COLORS = [
-  "#6db3ff", "#7ee787", "#ffcf8f", "#d6a8ff",
-  "#f4a3c0", "#5ed3d3", "#b8e060", "#ff9d5c",
-  "#8fa7ff", "#63e6a8", "#e6c445", "#c792ea",
-  "#ff8fa3", "#4fc3f7", "#a5d66f", "#ffb86c",
+  "#5b8cc4", "#6aa87a", "#c2a163", "#9c7fbe",
+  "#c07f97", "#5aa5a5", "#8fa85c", "#c48a5e",
+  "#7285bd", "#5fa38c", "#b39a4e", "#a37fb5",
+  "#bd7f88", "#5795b5", "#87a866", "#c2915c",
 ];
 
 // ---- app state ----
@@ -1103,10 +1109,87 @@ interface GCtx {
   placed: Placed[];
   byId: Map<string, Placed>;
   refsByHash: Map<string, RefInfo[]>;
-  graphW: number;
+  graphViewW: number; // visible width of the graph column
+  graphFullW: number; // width all lanes would need
 }
 let gctx: GCtx | null = null;
 let paintQueued = false;
+
+// ---- graph column: its own horizontal scroll ----
+// Only the lanes move; the commit messages stay put. Driven by the SVG viewBox
+// (see renderGraph) plus a slim scrollbar in the "Graph" column header.
+function graphPanMax(): number {
+  return gctx ? Math.max(0, gctx.graphFullW - gctx.graphViewW) : 0;
+}
+
+function setGraphPan(x: number) {
+  const max = graphPanMax();
+  const next = Math.max(0, Math.min(x, max));
+  if (next === graphPanX) return;
+  graphPanX = next;
+  if (gctx) {
+    const svg = $("graph-svg") as unknown as SVGSVGElement;
+    svg.setAttribute(
+      "viewBox",
+      `${graphPanX} 0 ${gctx.graphViewW} ${gctx.placed.length * ROW_H}`
+    );
+  }
+  updateGraphHBar();
+}
+
+// slim scrollbar under the "Graph" header — hidden when everything fits
+function updateGraphHBar() {
+  const bar = document.getElementById("graph-hbar");
+  const thumb = document.getElementById("graph-hthumb");
+  if (!bar || !thumb || !gctx) return;
+  const max = graphPanMax();
+  bar.classList.toggle("hidden", max <= 0);
+  if (max <= 0) return;
+  const ratio = gctx.graphViewW / gctx.graphFullW;
+  thumb.style.width = `${Math.max(12, ratio * 100)}%`;
+  thumb.style.left = `${(graphPanX / gctx.graphFullW) * 100}%`;
+}
+
+function setupGraphPan() {
+  // horizontal wheel (or shift+wheel) while over the graph column
+  $("scroll").addEventListener(
+    "wheel",
+    (e) => {
+      if (!gctx || graphPanMax() <= 0) return;
+      const rect = $("scroll").getBoundingClientRect();
+      const overGraph = e.clientX - rect.left + $("scroll").scrollLeft < gctx.graphViewW;
+      if (!overGraph) return;
+      const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+      if (dx === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setGraphPan(graphPanX + dx);
+    },
+    { passive: false }
+  );
+
+  // drag the scrollbar thumb
+  const bar = document.getElementById("graph-hbar");
+  bar?.addEventListener("mousedown", (e) => {
+    if (!gctx) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = bar.getBoundingClientRect();
+    const jump = (clientX: number) => {
+      const frac = (clientX - rect.left) / Math.max(1, rect.width);
+      // centre the thumb on the cursor
+      setGraphPan(frac * gctx!.graphFullW - gctx!.graphViewW / 2);
+    };
+    jump(e.clientX);
+    const move = (ev: MouseEvent) => jump(ev.clientX);
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+}
 
 function schedulePaint() {
   if (paintQueued) return;
@@ -1134,24 +1217,31 @@ function renderGraph(t: Tab) {
     refsByHash.set(r.target, arr);
   }
 
-  const graphW = laneX(maxLane) + PAD;
+  // lanes keep their full width; the column just shows a window onto them
+  const graphFullW = laneX(maxLane) + PAD;
+  const graphViewW = Math.min(graphFullW, GRAPH_VIEW_MAX);
   const totalH = placed.length * ROW_H;
+  graphPanX = Math.max(0, Math.min(graphPanX, graphFullW - graphViewW));
 
   const svg = $("graph-svg") as unknown as SVGSVGElement;
-  svg.setAttribute("width", String(graphW));
+  svg.setAttribute("width", String(graphViewW));
   svg.setAttribute("height", String(totalH));
-  svg.style.left = `${REF_W}px`;
-  (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphW}px`;
+  // viewBox pans the lanes horizontally and clips them to the column — no
+  // extra scroll container, so nothing can drift out of sync with the rows
+  svg.setAttribute("viewBox", `${graphPanX} 0 ${graphViewW} ${totalH}`);
+  svg.style.left = "0px"; // graph is the leftmost column
+  (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphViewW}px`;
   $("rows").style.height = `${totalH}px`;
 
   // min content width so the message column isn't cut off on narrow windows
   // (horizontal scroll kicks in instead of truncating)
   const MSG_MIN = 420;
-  const contentW = REF_W + graphW + MSG_MIN;
+  const contentW = graphViewW + MSG_MIN;
   $("graph-content").style.minWidth = `${contentW}px`;
   $("col-headers").style.minWidth = `${contentW}px`;
 
-  gctx = { tab: t, placed, byId, refsByHash, graphW };
+  gctx = { tab: t, placed, byId, refsByHash, graphViewW, graphFullW };
+  updateGraphHBar();
   $("empty").classList.add("hidden");
   paintViewport();
 }
@@ -1159,7 +1249,7 @@ function renderGraph(t: Tab) {
 // render only the rows/nodes/edges visible in the scroll viewport
 function paintViewport() {
   if (!gctx) return;
-  const { tab: t, placed, byId, refsByHash, graphW } = gctx;
+  const { tab: t, placed, byId, refsByHash, graphViewW } = gctx;
   const repo = t.repo;
 
   // lineage: highlight the whole branch line — ancestors AND descendants
@@ -1328,18 +1418,23 @@ function paintViewport() {
     const x = laneX(p.lane), y = rowY(p.row);
     const op = nodeOp(p.node.id);
     if (p.node.kind === "stash") {
-      const sz = 11;
+      const sz = NODE_R * 2.2;
       parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="#1e1e2a" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
     } else if (p.node.kind === "wip") {
       parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="2" stroke-dasharray="2 2"${op}/>`);
     } else {
       const c = p.node.commit!;
-      const half = AVATAR / 2;
+      // flat dot in the branch's color — small enough that the lanes stay
+      // readable. Merges get a hollow centre so they're distinguishable.
+      const isMerge = c.parents.length > 1;
       if (c.hash === repo.head) {
         const stroke = repo.head_branch ? "#ffffff" : "#ff8f8f";
-        parts.push(`<rect x="${x - half - 2}" y="${y - half - 2}" width="${AVATAR + 4}" height="${AVATAR + 4}" rx="6" fill="none" stroke="${stroke}" stroke-width="2"${op}/>`);
+        parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R + Math.max(2, NODE_R * 0.6)}" fill="none" stroke="${stroke}" stroke-width="1.5"${op}/>`);
       }
-      parts.push(`<image href="${avatarUrl(c.email || c.author)}" x="${x - half}" y="${y - half}" width="${AVATAR}" height="${AVATAR}"${op}><title>${escapeHtml(`${c.author} <${c.email}>`)}</title></image>`);
+      parts.push(
+        `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${isMerge ? "#1e1e2a" : p.color}" stroke="${p.color}" stroke-width="2"${op}>` +
+          `<title>${escapeHtml(`${c.author} <${c.email}>`)}</title></circle>`
+      );
     }
   }
   ($("graph-svg") as unknown as SVGSVGElement).innerHTML = parts.join("");
@@ -1394,14 +1489,22 @@ function paintViewport() {
       msgHtml =
         `<span class="summary">${escapeHtml(c.summary)}</span>` +
         fileHistNumBadge(c.hash) +
-        `<span class="author">${escapeHtml(c.author)}</span>` +
+        // avatar sits with the author name (not on the graph node) so the
+        // lanes stay clean and the identicon is where it's actually read
+        `<span class="author" title="${escapeHtml(`${c.author} <${c.email}>`)}">` +
+        `<img class="av" src="${avatarUrl(c.email || c.author)}" alt=""/>` +
+        `${escapeHtml(c.author)}</span>` +
         `<span class="date">${fmtDate(c.time)}</span>` +
         `<span class="hash">${c.hash.slice(0, 8)}</span>`;
     }
+    // graph first (the eye lands on the structure), then the message with its
+    // ref pills inline — label sits directly against what it labels
     row.innerHTML =
-      `<div class="col-ref">${refHtml}</div>` +
-      `<div class="col-graph" style="width:${graphW}px"></div>` +
-      `<div class="col-msg">${msgHtml}</div>`;
+      `<div class="col-graph" style="width:${graphViewW}px"></div>` +
+      `<div class="col-msg">` +
+      (refHtml ? `<span class="refs">${refHtml}</span>` : "") +
+      msgHtml +
+      `</div>`;
     attachRowEvents(row, n, repo, refsByHash);
     rows.appendChild(row);
   }
@@ -1442,7 +1545,7 @@ function attachRowEvents(
   });
 
   // drag & drop on the graph's branch badges -> merge / rebase
-  row.querySelectorAll<HTMLElement>(".col-ref .badge[data-refname]").forEach((b) => {
+  row.querySelectorAll<HTMLElement>(".col-msg .badge[data-refname]").forEach((b) => {
     const name = b.dataset.refname!;
     const isLocal = b.dataset.refkind === "local";
     // double-click a branch/tag badge -> checkout
@@ -1608,6 +1711,8 @@ async function selectNode(n: GNode | null, scroll = false) {
   $("detail-empty").classList.add("hidden");
   $("commit-panel").classList.toggle("hidden", n.kind !== "wip");
   $("detail-body").classList.toggle("hidden", n.kind === "wip");
+  bodyReqHash = ""; // drop any in-flight body fetch from the previous selection
+  $("d-body").classList.add("hidden");
 
   if (n.kind === "wip") {
     await refreshCommitFiles();
@@ -1627,6 +1732,7 @@ async function selectNode(n: GNode | null, scroll = false) {
 
   const c = n.commit!;
   $("d-summary").textContent = c.summary;
+  showCommitBody(t.repo.path, c.hash);
   $("d-meta").innerHTML =
     `<div>${escapeHtml(c.author)} &lt;${escapeHtml(c.email)}&gt;</div>` +
     `<div>${new Date(c.time * 1000).toLocaleString()}</div>` +
@@ -1637,6 +1743,26 @@ async function selectNode(n: GNode | null, scroll = false) {
           .join(", ")}</div>`
       : `<div>(root commit)</div>`);
   await loadFiles(t.repo.path, c.hash);
+}
+
+// full commit message body under the subject line (empty for most commits).
+// Loaded on demand; the hash guard drops results for a commit you already
+// clicked away from.
+let bodyReqHash = "";
+async function showCommitBody(path: string, hash: string) {
+  const el = $("d-body");
+  bodyReqHash = hash;
+  el.classList.add("hidden");
+  el.textContent = "";
+  try {
+    const body = await invoke<string>("commit_body", { path, hash });
+    if (bodyReqHash !== hash) return; // a newer selection won
+    if (!body.trim()) return;
+    el.textContent = body;
+    el.classList.remove("hidden");
+  } catch {
+    /* no body / unreadable — just leave it hidden */
+  }
 }
 
 // hash === null means WIP (working tree)
@@ -2012,6 +2138,7 @@ async function showBlame() {
   setBlameBtn(true);
   setPlainBtn(false);
   dvfClose();
+  setEditBtn(false);
   const { path, file, hash } = diffCtx;
   const title = `Blame · ${file}`;
   $("diffview-title").textContent = title;
@@ -2427,6 +2554,7 @@ async function refreshCommitFiles() {
 // split mode: keep the graph visible NEXT to the diff (file-history browsing)
 let histSplit = false;
 function showDiffView(on: boolean) {
+  openFileStamp = ""; // re-baseline: a different file isn't an edit
   $("mergeview").classList.add("hidden");
   $("diffview").classList.toggle("hidden", !on);
   const split = on && histSplit;
@@ -2512,8 +2640,8 @@ function renderMergeSide(elId: string, side: "ours" | "theirs") {
         const code =
           i < pairs
             ? side === "ours"
-              ? intraline(l, other[i]).o
-              : intraline(other[i], l).n
+              ? intraline(l, other[i], lang).o
+              : intraline(other[i], l, lang).n
             : hlLine(l, lang);
         html += `<div class="ml ${side} conf"><span class="ln">${n}</span><span class="dc">${code}</span></div>`;
       });
@@ -2650,14 +2778,14 @@ function renderMergeResult() {
         s.ours!.forEach((l, i) => {
           contentRows++;
           const num = c ? String(++n) : "";
-          const code = i < pairs ? intraline(l, s.theirs![i]).o : hlLine(l, lang);
+          const code = i < pairs ? intraline(l, s.theirs![i], lang).o : hlLine(l, lang);
           html += `<div class="ml ours"><span class="ln">${num}</span><span class="dc">${code}</span></div>`;
         });
       if (showTheirs)
         s.theirs!.forEach((l, i) => {
           contentRows++;
           const num = c ? String(++n) : "";
-          const code = i < pairs ? intraline(s.ours![i], l).n : hlLine(l, lang);
+          const code = i < pairs ? intraline(s.ours![i], l, lang).n : hlLine(l, lang);
           html += `<div class="ml theirs"><span class="ln">${num}</span><span class="dc">${code}</span></div>`;
         });
     }
@@ -2911,6 +3039,11 @@ async function togglePlainView() {
     lastView?.(); // back to the diff
     return;
   }
+  await renderPlainView();
+}
+
+async function renderPlainView() {
+  if (!diffCtx) return;
   const { path, file, hash } = diffCtx;
   const body = $("diffview-body");
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
@@ -2953,6 +3086,179 @@ async function copyPlainFile() {
     setStatus("File content copied to clipboard");
   } catch (e) {
     errorModal("Copy failed:\n" + String(e));
+  }
+}
+
+// ---- edit mode: change the file and save it to the working tree ----
+let editOn = false;
+let editOriginal = ""; // content as loaded, to detect unsaved changes
+function setEditBtn(on: boolean) {
+  editOn = on;
+  const b = document.getElementById("diffview-modify");
+  if (b) b.textContent = on ? "✕ Cancel edit" : "Modify";
+  $("diffview-save").classList.toggle("hidden", !on);
+}
+
+function editDirty(): boolean {
+  const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
+  return !!ta && ta.value !== editOriginal;
+}
+
+async function toggleEditFile() {
+  if (!diffCtx) return;
+  if (editOn) {
+    if (editDirty() && !(await confirmModal("Discard your unsaved changes to this file?")))
+      return;
+    setEditBtn(false);
+    lastView?.(); // back to the diff/plain view
+    return;
+  }
+  const { path, file, hash } = diffCtx;
+  // Editing a file from a commit: check that commit out FIRST, so the edit is
+  // made on top of the state it belongs to (not mixed into whatever is
+  // currently checked out).
+  if (hash) {
+    const t = cur();
+    if (!t) return;
+    if (t.repo.head !== hash) {
+      // prefer a local branch that points here — avoids a detached HEAD
+      // Land on a real BRANCH whenever one exists here — a local branch, or a
+      // local tracking branch for a remote-only one. Only a commit with no
+      // branch at all falls back to a detached checkout.
+      const local = t.repo.refs.find((r) => r.kind === "local" && r.target === hash);
+      const remote = local
+        ? undefined
+        : t.repo.refs.find((r) => r.kind === "remote" && r.target === hash);
+      const target = local
+        ? local.name
+        : remote
+          ? remote.name.split("/").slice(1).join("/") // strip the remote prefix
+          : hash;
+      const upstream = remote ? remote.name : null;
+      const label = local || remote ? target : hash.slice(0, 8);
+
+      const ok = await confirmModal(
+        local
+          ? `Check out branch "${target}" (at ${hash.slice(0, 8)}) before editing ${basename(file)}?\n\n` +
+              `Uncommitted changes are stashed first.`
+          : remote
+            ? `Check out "${target}" (tracking ${remote.name}) before editing ${basename(file)}?\n\n` +
+                `The local branch is created if it doesn't exist yet, so you stay on a branch ` +
+                `instead of a detached HEAD.\n\nUncommitted changes are stashed first.`
+            : `Check out commit ${hash.slice(0, 8)} before editing ${basename(file)}?\n\n` +
+                `No branch points at this commit, so the repo goes into DETACHED HEAD state — ` +
+                `commit to a new branch afterwards or the work is easy to lose.\n\n` +
+                `Uncommitted changes are stashed first.`
+      );
+      if (!ok) return;
+      setStatus(`checking out ${label}…`);
+      pushBusy();
+      try {
+        const stashed = await invoke<boolean>("checkout", { path, target, upstream });
+        await reloadActive(
+          stashed ? `Checked out ${label} — local changes stashed` : `Checked out ${label}`
+        );
+      } catch (e) {
+        setStatus("");
+        errorModal("Checkout failed — not editing:\n" + String(e));
+        return;
+      } finally {
+        popBusy();
+      }
+    }
+    // now editing the working tree at that commit, not a historical blob
+    diffCtx = { path, file, hash: null };
+  }
+  const body = $("diffview-body");
+  body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
+  showDiffView(true); // a checkout above re-rendered the tab and hid the view
+  try {
+    // always the working tree now — the commit (if any) is checked out
+    const content = await invoke<string>("file_at_commit", { path, hash: "", file });
+    editOriginal = content;
+    setEditBtn(true);
+    setPlainBtn(false);
+    setBlameBtn(false);
+    setPickButtons(false);
+    dvfClose();
+    $("diff-minimap").innerHTML = "";
+    $("diffview-title").textContent = `${file} — editing (working tree)`;
+    // leaving the editor lands on the file's unstaged diff
+    lastView = () => openWipDiff(path, file, false);
+    // syntax-highlighted layer behind a transparent textarea, so editing keeps
+    // the same coloring as every other file view
+    body.innerHTML =
+      `<div id="dv-editwrap"><pre id="dv-edithl" aria-hidden="true"></pre>` +
+      `<textarea id="dv-edit" spellcheck="false"></textarea></div>`;
+    const ta = $("dv-edit") as HTMLTextAreaElement;
+    ta.value = content;
+    setupEditHighlight(langForFile(file));
+    ta.focus();
+  } catch (e) {
+    body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
+  }
+}
+
+// keep the highlight layer in step with the textarea (content + scroll).
+// Very large files skip highlighting — re-running hljs per keystroke on those
+// would make typing lag, and a responsive editor matters more than color.
+const EDIT_HL_MAX_LINES = 6000;
+function setupEditHighlight(lang: string | null) {
+  const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
+  const hl = document.getElementById("dv-edithl");
+  if (!ta || !hl) return;
+  const tooBig = ta.value.split("\n").length > EDIT_HL_MAX_LINES;
+  if (!lang || tooBig) {
+    // no highlighting: show the textarea's own text instead of a clear one
+    ta.classList.add("plaintext");
+    return;
+  }
+  let queued = false;
+  const paint = () => {
+    // trailing newline needs a filler line or the last row can't scroll into view
+    hl.innerHTML = hljs.highlight(ta.value + "\n", {
+      language: lang,
+      ignoreIllegals: true,
+    }).value;
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      paint();
+    });
+  };
+  const syncScroll = () => {
+    hl.scrollTop = ta.scrollTop;
+    hl.scrollLeft = ta.scrollLeft;
+  };
+  ta.addEventListener("input", () => {
+    schedule();
+    syncScroll();
+  });
+  ta.addEventListener("scroll", syncScroll);
+  paint();
+}
+
+async function saveEditedFile() {
+  const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
+  if (!diffCtx || !ta) return;
+  const { path, file } = diffCtx;
+  const btn = $("diffview-save") as HTMLButtonElement;
+  btn.disabled = true;
+  try {
+    await invoke("write_file_worktree", { path, file, content: ta.value });
+    editOriginal = ta.value;
+    await afterStageChange(); // WIP counts + graph pick up the edit
+    setStatus(`Saved ${file}`);
+    setEditBtn(false);
+    // show the result as a normal unstaged diff of the file
+    await openWipDiff(path, file, false);
+  } catch (e) {
+    errorModal("Save failed:\n" + String(e));
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -3070,6 +3376,7 @@ async function openDiff(
   lastView = () => openDiff(title, path, file, hash, split);
   setBlameBtn(false);
   setPlainBtn(false);
+  setEditBtn(false);
   setPickButtons(!!hash && !isImage(file));
   if (isImage(file)) {
     await showImageDiff(title, path, file, hash);
@@ -3108,6 +3415,7 @@ async function openWipDiff(path: string, file: string, staged: boolean) {
   lastView = () => openWipDiff(path, file, staged);
   setBlameBtn(false);
   setPlainBtn(false);
+  setEditBtn(false);
   setPickButtons(false);
   wipDiffCtx = null;
   if (isImage(file)) {
@@ -3505,6 +3813,11 @@ function setCpBtn(on: boolean) {
 function setPickButtons(visible: boolean) {
   $("diffview-pickfile").classList.toggle("hidden", !visible);
   $("diffview-picklines").classList.toggle("hidden", !visible);
+  // text-editing only makes sense for text files
+  $("diffview-modify").classList.toggle(
+    "hidden",
+    !!(diffCtx && isImage(diffCtx.file))
+  );
   $("diffview-whole").classList.add("hidden"); // only the WIP views re-show it
   setCpBtn(false);
 }
@@ -4024,6 +4337,7 @@ async function openCompareDiff(path: string, hash: string, file: string) {
   lastView = () => openCompareDiff(path, hash, file);
   setBlameBtn(false);
   setPlainBtn(false);
+  setEditBtn(false);
   setPickButtons(false);
   const title = `${file} — ${hash.slice(0, 8)} ↔ working`;
   if (isImage(file)) {
@@ -4188,6 +4502,7 @@ async function pollActive() {
   if (!t) return;
   polling = true;
   try {
+    await checkOpenFileChanged(); // content edits don't move the fingerprint
     const fp = await invoke<string>("repo_fingerprint", { path: t.repo.path });
     if (t.fingerprint === undefined) {
       t.fingerprint = fp; // first sight: baseline, don't reload
@@ -4195,12 +4510,69 @@ async function pollActive() {
       t.fingerprint = fp;
       await reloadGraphOnly();
       if (t.selected === WIP_ID) await refreshCommitFiles();
+      await refreshOpenFileView(); // the open file may have changed on disk
     }
   } catch {
     /* repo gone/locked — ignore this tick */
   } finally {
     polling = false;
   }
+}
+
+// The repo fingerprint is status-based, so it does NOT move when an already
+// modified file is edited again (" M file" either way). Watch the open file's
+// own mtime+size so those edits still refresh the view.
+let openFileStamp = "";
+async function checkOpenFileChanged() {
+  if (!diffCtx || $("diffview").classList.contains("hidden")) return;
+  if (editOn || isBusy()) return;
+  // only working-tree content can change under us (commit blobs are immutable)
+  if (!cpOn && diffCtx.hash) return;
+  let stamp: string;
+  try {
+    stamp = await invoke<string>("file_stamp", {
+      path: diffCtx.path,
+      file: diffCtx.file,
+    });
+  } catch {
+    return; // file deleted / unreadable — leave the view alone
+  }
+  const tagged = `${diffCtx.path} ${diffCtx.file} ${stamp}`;
+  if (!openFileStamp) {
+    openFileStamp = tagged; // first sight: baseline, don't refresh
+    return;
+  }
+  if (openFileStamp !== tagged) {
+    openFileStamp = tagged;
+    await refreshOpenFileView();
+  }
+}
+
+// A file view showing WORKING-TREE content can go stale when the file changes
+// behind our back (your editor, a build script, another git tool). Re-render it
+// when the repo fingerprint moves — but never destroy in-progress user state.
+async function refreshOpenFileView() {
+  if ($("diffview").classList.contains("hidden")) return; // no file view open
+  if (editOn) return; // mid-edit: refreshing would throw away the typing
+  if (isBusy()) return; // an action is mid-flight; it refreshes on its own
+  const body = $("diffview-body");
+  const scroll = body.scrollTop;
+
+  if (cpOn) {
+    // cherry-pick split compares against the worktree, so it must follow along
+    await refreshCpDiff();
+  } else if (!diffCtx || diffCtx.hash) {
+    return; // committed blobs are immutable — nothing to refresh
+  } else if (plainOn) {
+    await renderPlainView();
+  } else if (blameOn) {
+    await showBlame();
+  } else if (wipDiffCtx) {
+    await openWipDiff(wipDiffCtx.path, wipDiffCtx.file, wipDiffCtx.staged);
+  } else {
+    await lastView?.();
+  }
+  body.scrollTop = scroll; // stay where the user was reading
 }
 
 // enable/disable + tooltip the top toolbar based on repo state
@@ -5047,9 +5419,45 @@ function avatarUrl(key: string): string {
   avatarCache.set(key, url);
   return url;
 }
-// char-level diff of two strings: highlight the differing middle (common
-// prefix/suffix stripped). Returns already-escaped HTML for old and new.
-function intraline(oldS: string, newS: string): { o: string; n: string } {
+// Wrap the [start,end) CHARACTER range of already-highlighted HTML in a marker
+// span, splitting across the syntax spans as needed. Lets the char-level diff
+// marks sit on top of syntax highlighting instead of replacing it.
+function markRange(html: string, start: number, end: number, cls: string): string {
+  if (start >= end) return html;
+  const holder = document.createElement("div");
+  holder.innerHTML = html;
+  const walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT);
+  const texts: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) texts.push(node as Text);
+
+  let pos = 0;
+  for (const t of texts) {
+    const len = t.data.length; // capture BEFORE splitting
+    const s = Math.max(start, pos);
+    const e = Math.min(end, pos + len);
+    if (s < e) {
+      const localS = s - pos;
+      const localE = e - pos;
+      t.splitText(localE); // tail stays a sibling; t is now [0, localE)
+      const mid = t.splitText(localS); // mid is [localS, localE)
+      const span = document.createElement("span");
+      span.className = cls;
+      mid.replaceWith(span);
+      span.appendChild(mid);
+    }
+    pos += len;
+  }
+  return holder.innerHTML;
+}
+
+// char-level diff of two strings: syntax-highlight both, then mark the
+// differing middle (common prefix/suffix stripped).
+function intraline(
+  oldS: string,
+  newS: string,
+  lang: string | null = null
+): { o: string; n: string } {
   const min = Math.min(oldS.length, newS.length);
   let p = 0;
   while (p < min && oldS[p] === newS[p]) p++;
@@ -5059,15 +5467,9 @@ function intraline(oldS: string, newS: string): { o: string; n: string } {
     oldS[oldS.length - 1 - s] === newS[newS.length - 1 - s]
   )
     s++;
-  const pre = oldS.slice(0, p);
-  const oMid = oldS.slice(p, oldS.length - s);
-  const nMid = newS.slice(p, newS.length - s);
-  const oSuf = oldS.slice(oldS.length - s);
-  const nSuf = newS.slice(newS.length - s);
-  const wrap = (m: string) => (m ? `<span class="chg">${escapeHtml(m)}</span>` : "");
   return {
-    o: escapeHtml(pre) + wrap(oMid) + escapeHtml(oSuf),
-    n: escapeHtml(pre) + wrap(nMid) + escapeHtml(nSuf),
+    o: markRange(hlLine(oldS, lang), p, oldS.length - s, "chg"),
+    n: markRange(hlLine(newS, lang), p, newS.length - s, "chg"),
   };
 }
 
@@ -5103,7 +5505,7 @@ function renderUnifiedDiff(diff: string): string {
           "del",
           String(d.ln),
           "",
-          i < pair ? intraline(d.text, adds[i].text).o : hlLine(d.text, lang)
+          i < pair ? intraline(d.text, adds[i].text, lang).o : hlLine(d.text, lang)
         )
       )
     );
@@ -5113,7 +5515,7 @@ function renderUnifiedDiff(diff: string): string {
           "add",
           "",
           String(a.ln),
-          i < pair ? intraline(dels[i].text, a.text).n : hlLine(a.text, lang)
+          i < pair ? intraline(dels[i].text, a.text, lang).n : hlLine(a.text, lang)
         )
       )
     );
@@ -5184,6 +5586,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("diffview-picklines").addEventListener("click", toggleCherryPickLines);
   $("diffview-plain").addEventListener("click", () => void togglePlainView());
   $("diffview-copy").addEventListener("click", () => void copyPlainFile());
+  $("diffview-modify").addEventListener("click", () => void toggleEditFile());
+  $("diffview-save").addEventListener("click", () => void saveEditedFile());
   // right-click a text selection in the file view -> history of those lines
   $("diffview-body").addEventListener("contextmenu", (e) => {
     if (!diffCtx) return;
@@ -5241,6 +5645,7 @@ window.addEventListener("DOMContentLoaded", () => {
       stepHistEntry(-1); // newer
     }
   });
+  setupGraphPan(); // graph column scrolls sideways on its own
   linkHistScroll(); // list <-> graph proportional scroll in file-history split
   // clicking the sidebar or empty graph space resets the branch highlight
   $("sidebar").addEventListener("click", clearGraphHighlight);
@@ -5343,6 +5748,13 @@ window.addEventListener("keydown", (e) => {
     if (!$("diffview").classList.contains("hidden")) dvfOpen();
     else openSearch();
   }
+});
+// Ctrl/Cmd+S saves the file while editing it
+window.addEventListener("keydown", (e) => {
+  if (!((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s")) return;
+  if (!editOn) return;
+  e.preventDefault();
+  void saveEditedFile();
 });
 // Ctrl/Cmd+A in the file view selects ONLY the file content, not the whole UI
 window.addEventListener("keydown", (e) => {
