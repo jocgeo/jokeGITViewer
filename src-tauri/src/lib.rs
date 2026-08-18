@@ -1,7 +1,7 @@
 // jokeGITViewer — Rust backend.
 // Talks to the local `git` CLI (no native libgit2 build needed).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
@@ -189,19 +189,32 @@ where
 // Run `git` in `repo` with args. On Windows, suppress the console window.
 // core.quotepath=false keeps non-ASCII paths raw UTF-8 instead of octal soup.
 //
-// GIT_OPTIONAL_LOCKS=0 is the important one: it stops read-only commands from
-// taking index.lock as a side effect (`git status` normally re-writes the index
-// stat cache). The 1.5s status poll would otherwise fight every other git tool
-// open on the same repo. Required locks — checkout, commit, add — are
-// unaffected, so writes still behave exactly as before.
+// Normal git: allowed to take locks, so `git status` can persist its refreshed
+// index stat cache. That cache matters a LOT — without it every command
+// re-hashes the whole worktree (~700ms vs ~90ms on a 3k-file repo), so we do
+// NOT set GIT_OPTIONAL_LOCKS here. Only the 1.5s poll opts out (see git_ro).
 fn git(repo: &str, args: &[&str]) -> Result<String, String> {
+    git_env(repo, args, false)
+}
+
+// Read-only git for the frequent background poll: GIT_OPTIONAL_LOCKS=0 stops it
+// from taking index.lock every tick, which is what collided with other git
+// tools open on the same repo. It can't refresh the stat cache, but the
+// user-driven commands above keep that warm.
+fn git_ro(repo: &str, args: &[&str]) -> Result<String, String> {
+    git_env(repo, args, true)
+}
+
+fn git_env(repo: &str, args: &[&str], no_optional_locks: bool) -> Result<String, String> {
     with_lock_retry(|| {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
             .arg(repo)
             .args(["-c", "core.quotepath=false"])
-            .args(args)
-            .env("GIT_OPTIONAL_LOCKS", "0");
+            .args(args);
+        if no_optional_locks {
+            cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        }
 
         #[cfg(windows)]
         {
@@ -240,7 +253,6 @@ fn git_stdin(repo: &str, args: &[&str], input: &str) -> Result<String, String> {
             .args(["-c", "core.quotepath=false"])
             .args(args)
             .arg("-")
-            .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -589,7 +601,7 @@ fn wip_from_status(raw: &str, head: &str) -> Option<WipStatus> {
 // raw inputs for the repo fingerprint (shared by open_repo + repo_fingerprint
 // so both produce byte-identical strings and the poll never false-triggers)
 fn fingerprint_refs(repo: &str) -> String {
-    git(
+    git_ro(
         repo,
         &[
             "for-each-ref",
@@ -602,7 +614,7 @@ fn fingerprint_refs(repo: &str) -> String {
     .unwrap_or_default()
 }
 fn fingerprint_stash(repo: &str) -> String {
-    git(repo, &["rev-parse", "--quiet", "--verify", "refs/stash"]).unwrap_or_default()
+    git_ro(repo, &["rev-parse", "--quiet", "--verify", "refs/stash"]).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1194,6 +1206,81 @@ async fn write_file_worktree(path: String, file: String, content: String) -> Res
     std::fs::write(&full, body).map_err(|e| e.to_string())
 }
 
+// ---- contributor avatars from the repo's own GitLab host ----
+// Host of the `origin` remote ("gitlab.company.com"), empty if there is none.
+// Handles https://, ssh:// and the scp-like git@host:group/proj form.
+fn remote_host_of(url: &str) -> String {
+    let url = url.trim();
+    let after_scheme = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => match url.split_once('@') {
+            // git@host:group/proj.git
+            Some((_, rest)) => return rest.split(':').next().unwrap_or("").to_string(),
+            None => url,
+        },
+    };
+    let hostpart = after_scheme.split('/').next().unwrap_or("");
+    let hostpart = match hostpart.split_once('@') {
+        Some((_, h)) => h, // ssh://git@host:22/...
+        None => hostpart,
+    };
+    hostpart.split(':').next().unwrap_or("").to_string()
+}
+
+#[tauri::command]
+async fn remote_host(path: String) -> Result<String, String> {
+    let url = git(&path, &["remote", "get-url", "origin"]).unwrap_or_default();
+    Ok(remote_host_of(&url))
+}
+
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct GitLabAvatar {
+    avatar_url: Option<String>,
+}
+
+// GitLab's public avatar lookup: /api/v4/avatar?email=... . Unauthenticated on
+// most instances. Any failure (not GitLab, locked down, offline, no such user)
+// returns "" so the caller falls back to the generated identicon.
+#[tauri::command]
+async fn gitlab_avatar(host: String, email: String) -> Result<String, String> {
+    if host.is_empty() || email.is_empty() {
+        return Ok(String::new());
+    }
+    let url = format!(
+        "https://{host}/api/v4/avatar?email={}&size=64",
+        pct_encode(&email)
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .user_agent("jokeGITViewer")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return Ok(String::new()), // offline / not resolvable
+    };
+    if !resp.status().is_success() {
+        return Ok(String::new());
+    }
+    match resp.json::<GitLabAvatar>().await {
+        Ok(v) => Ok(v.avatar_url.unwrap_or_default()),
+        Err(_) => Ok(String::new()), // not a GitLab API (HTML login page, etc.)
+    }
+}
+
 // Full commit message body (everything after the subject line). Fetched on
 // demand — putting %b in the bulk log format would bloat every commit record.
 #[tauri::command]
@@ -1368,11 +1455,13 @@ async fn checkout(path: String, target: String, upstream: Option<String>) -> Res
 #[tauri::command]
 async fn repo_fingerprint(path: String) -> Result<String, String> {
     let p = path.as_str();
-    // polled every 1.5s — run the four probes concurrently
+    // Polled every 1.5s — four probes, run concurrently, all via git_ro so this
+    // never takes index.lock (that is what fought other git tools). It cannot
+    // refresh the index stat cache, but the user-driven commands do that.
     let (head, status, refs, stash) = std::thread::scope(|s| {
-        let head = s.spawn(move || git(p, &["rev-parse", "HEAD"]).unwrap_or_default());
+        let head = s.spawn(move || git_ro(p, &["rev-parse", "HEAD"]).unwrap_or_default());
         let status = s.spawn(move || {
-            git(p, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default()
+            git_ro(p, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default()
         });
         let refs = s.spawn(move || fingerprint_refs(p));
         let stash = s.spawn(move || fingerprint_stash(p));
@@ -1958,6 +2047,8 @@ pub fn run() {
             write_file_worktree,
             file_stamp,
             commit_body,
+            remote_host,
+            gitlab_avatar,
             diff_worktree_to_commit,
             clone_repo,
             chat_pull,

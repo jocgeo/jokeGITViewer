@@ -218,10 +218,10 @@ const WIP_COLOR = "#ff9d5c";
 // branches, while the muted tone keeps the graph from shouting over the
 // commit messages (bright saturated lanes make everything feel equally loud).
 const COLORS = [
-  "#5b8cc4", "#6aa87a", "#c2a163", "#9c7fbe",
-  "#c07f97", "#5aa5a5", "#8fa85c", "#c48a5e",
-  "#7285bd", "#5fa38c", "#b39a4e", "#a37fb5",
-  "#bd7f88", "#5795b5", "#87a866", "#c2915c",
+  "#4aa3ff", "#3fd07a", "#ffc247", "#c77dff",
+  "#ff7eb6", "#2fd4d4", "#a8e337", "#ff9d4d",
+  "#6f8cff", "#26d9a3", "#ffd23f", "#b96bff",
+  "#ff6b8a", "#38bdf8", "#84e04a", "#ffab52",
 ];
 
 // ---- app state ----
@@ -543,6 +543,27 @@ function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
   return { placed, maxLane };
 }
 
+const TIP_SZ = 15; // badge drawn on a branch/tag tip
+
+// which glyph marks this commit as a tip: a local branch wins over a
+// remote-only one, tags only when no branch points here. null = plain dot.
+function tipGlyph(refs: RefInfo[]): string | null {
+  if (!refs.length) return null;
+  if (refs.some((r) => r.kind === "local")) return "local";
+  if (refs.some((r) => r.kind === "remote")) return "remote";
+  if (refs.some((r) => r.kind === "tag")) return "tag";
+  return null;
+}
+
+// branch colour as a translucent row tint (see .crow --lane-bg)
+function laneTint(hex: string, alpha: number): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 const laneX = (lane: number) => PAD + lane * LANE_W;
 const rowY = (row: number) => row * ROW_H + ROW_H / 2;
 
@@ -634,6 +655,7 @@ function switchTab(i: number) {
   renderTabs();
   renderActive();
   syncChatToTab();
+  void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
   // fetch remote-tag status the first time this tab is viewed
   const t = cur();
@@ -653,6 +675,7 @@ function closeTab(i: number) {
   renderTabs();
   renderActive();
   syncChatToTab();
+  void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
 }
 
@@ -1314,9 +1337,12 @@ function paintViewport() {
     if (fileHistoryHL) return fileHistoryHL.has(id) ? 2 : 0;
     return branchLine === null ? 2 : branchLine.has(id) ? 2 : connected!.has(id) ? 1 : 0;
   };
+  // Edges are drawn in the SAME colour as their branch's nodes, but faded:
+  // the dots carry the emphasis and the lines just trace the connection, so
+  // the lanes read as structure instead of competing with the commits.
   const edgeOp = (a: string, b: string) => {
     const l = Math.min(levelOf(a), levelOf(b));
-    return l === 2 ? "" : l === 1 ? ` opacity="0.5"` : ` opacity="0.13"`;
+    return l === 2 ? ` opacity="0.5"` : l === 1 ? ` opacity="0.3"` : ` opacity="0.1"`;
   };
   const nodeOp = (id: string) => {
     const l = levelOf(id);
@@ -1424,17 +1450,41 @@ function paintViewport() {
       parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="2" stroke-dasharray="2 2"${op}/>`);
     } else {
       const c = p.node.commit!;
-      // flat dot in the branch's color — small enough that the lanes stay
-      // readable. Merges get a hollow centre so they're distinguishable.
+      // A branch/tag TIP gets a labelled badge instead of a plain dot — a
+      // monitor for a local branch, a cloud for a remote-only one, a tag
+      // glyph for tags. Ordinary commits stay small dots so the tips pop.
+      const refsHere = refsByHash.get(c.hash) ?? [];
+      const tip = tipGlyph(refsHere);
       const isMerge = c.parents.length > 1;
-      if (c.hash === repo.head) {
+      const isHead = c.hash === repo.head;
+      if (isHead) {
         const stroke = repo.head_branch ? "#ffffff" : "#ff8f8f";
-        parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R + Math.max(2, NODE_R * 0.6)}" fill="none" stroke="${stroke}" stroke-width="1.5"${op}/>`);
+        const r = tip ? TIP_SZ / 2 + 3 : NODE_R + Math.max(2, NODE_R * 0.6);
+        parts.push(`<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${stroke}" stroke-width="1.5"${op}/>`);
       }
-      parts.push(
-        `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${isMerge ? "#1e1e2a" : p.color}" stroke="${p.color}" stroke-width="2"${op}>` +
-          `<title>${escapeHtml(`${c.author} <${c.email}>`)}</title></circle>`
-      );
+      const who = `${c.author} <${c.email}>`;
+      const title = `<title>${escapeHtml(
+        tip ? `${refsHere.map((r) => r.name).join(", ")} — ${who}` : who
+      )}</title>`;
+      if (tip) {
+        const half = TIP_SZ / 2;
+        const gs = (TIP_SZ / 16) * 0.72; // glyph scale inside the badge
+        const gp = (TIP_SZ - 16 * gs) / 2; // centre it
+        parts.push(
+          `<g${op}>` +
+            `<rect x="${x - half}" y="${y - half}" width="${TIP_SZ}" height="${TIP_SZ}" rx="4" ` +
+            `fill="${p.color}" stroke="#141420" stroke-width="1.5"/>` +
+            `<g transform="translate(${x - half + gp} ${y - half + gp}) scale(${gs})" ` +
+            `fill="none" stroke="#141420" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+            `${ICONS[tip] ?? ""}</g>${title}</g>`
+        );
+      } else {
+        parts.push(
+          `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${isMerge ? "#1e1e2a" : p.color}" stroke="${p.color}" stroke-width="2"${op}>` +
+            title +
+            `</circle>`
+        );
+      }
     }
   }
   ($("graph-svg") as unknown as SVGSVGElement).innerHTML = parts.join("");
@@ -1449,6 +1499,9 @@ function paintViewport() {
     row.className = "crow";
     row.dataset.id = n.id;
     row.style.top = `${p.row * ROW_H}px`;
+    // faint wash of the branch's colour so each lane is readable across the
+    // whole row, not just at the dot
+    row.style.setProperty("--lane-bg", laneTint(p.color, 0.1));
     if (n.id === t.selected) row.classList.add("selected");
     const lvl = levelOf(n.id);
     if (lvl === 0) row.classList.add("dim");
@@ -1492,7 +1545,7 @@ function paintViewport() {
         // avatar sits with the author name (not on the graph node) so the
         // lanes stay clean and the identicon is where it's actually read
         `<span class="author" title="${escapeHtml(`${c.author} <${c.email}>`)}">` +
-        `<img class="av" src="${avatarUrl(c.email || c.author)}" alt=""/>` +
+        `<img class="av" src="${avatarFor(c.email, c.author)}" alt="" onerror="this.onerror=null;this.src='${avatarUrl(c.email || c.author)}'"/>` +
         `${escapeHtml(c.author)}</span>` +
         `<span class="date">${fmtDate(c.time)}</span>` +
         `<span class="hash">${c.hash.slice(0, 8)}</span>`;
@@ -1733,8 +1786,15 @@ async function selectNode(n: GNode | null, scroll = false) {
   const c = n.commit!;
   $("d-summary").textContent = c.summary;
   showCommitBody(t.repo.path, c.hash);
+  // author gets a proper row with their avatar (GitLab where available,
+  // identicon otherwise) instead of being one more line of grey text
+  const avaFallback = avatarUrl(c.email || c.author);
   $("d-meta").innerHTML =
-    `<div>${escapeHtml(c.author)} &lt;${escapeHtml(c.email)}&gt;</div>` +
+    `<div class="d-author">` +
+    `<img class="d-av" src="${avatarFor(c.email, c.author)}" alt="" ` +
+    `onerror="this.onerror=null;this.src='${avaFallback}'"/>` +
+    `<span class="d-au-txt"><span class="d-au-name">${escapeHtml(c.author)}</span>` +
+    `<span class="d-au-mail">${escapeHtml(c.email)}</span></span></div>` +
     `<div>${new Date(c.time * 1000).toLocaleString()}</div>` +
     `<div><code>${c.hash}</code></div>` +
     (c.parents.length
@@ -2365,6 +2425,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     renderTabs();
     renderActive();
     syncChatToTab();
+    void syncRepoHost(); // avatars are looked up against this repo's origin
     saveSession();
     saveRepoCache(path, repo);
     refreshRemoteTags(tab);
@@ -2460,6 +2521,7 @@ async function restoreSession() {
   renderTabs();
   renderActive();
   syncChatToTab();
+  void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
 
   const t = cur();
@@ -4790,7 +4852,7 @@ function renderChatMsgs() {
     const row = document.createElement("div");
     row.className = "chat-msg";
     row.innerHTML =
-      `<img class="chat-av" src="${avatarUrl(m.email || m.author)}" alt=""/>` +
+      `<img class="chat-av" src="${avatarFor(m.email, m.author)}" alt=""/>` +
       `<div class="chat-body"><div class="chat-meta">` +
       `<span class="chat-author">${escapeHtml(m.author)}</span>` +
       `<span class="chat-time">${fmtDate(m.time)}</span></div>` +
@@ -5388,6 +5450,76 @@ function icon(kind: string): string {
 // Deterministic GitHub-style identicon for an author key (email/name).
 // Same key -> same icon, always. Cached as a data URL.
 const avatarCache = new Map<string, string>();
+// ---- contributor avatars from the repo's GitLab instance ----
+// Resolved through GitLab's public /api/v4/avatar lookup and cached (including
+// misses, so a non-GitLab host isn't queried over and over). Until an avatar
+// resolves — or when it can't be — the generated identicon is used.
+let repoHost = ""; // origin host of the ACTIVE repo ("" = local/none)
+const glAvatars = new Map<string, string>(); // "host|email" -> url ("" = none)
+const glPending = new Set<string>();
+const LS_AVATARS = "jkt.avatars";
+
+function loadAvatarCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_AVATARS) ?? "{}");
+    for (const [k, v] of Object.entries(raw)) glAvatars.set(k, String(v));
+  } catch {}
+}
+function saveAvatarCache() {
+  try {
+    localStorage.setItem(LS_AVATARS, JSON.stringify(Object.fromEntries(glAvatars)));
+  } catch {}
+}
+
+// origin host for the active repo; avatars are looked up against it
+async function syncRepoHost() {
+  const t = cur();
+  if (!t) {
+    repoHost = "";
+    return;
+  }
+  try {
+    const host = await invoke<string>("remote_host", { path: t.repo.path });
+    if (host !== repoHost) {
+      repoHost = host;
+      schedulePaint();
+    }
+  } catch {
+    repoHost = "";
+  }
+}
+
+let avatarRepaint = 0;
+function ensureGitlabAvatar(email: string) {
+  const key = `${repoHost}|${email.toLowerCase()}`;
+  if (glAvatars.has(key) || glPending.has(key)) return;
+  glPending.add(key);
+  void invoke<string>("gitlab_avatar", { host: repoHost, email })
+    .then((url) => glAvatars.set(key, url))
+    .catch(() => glAvatars.set(key, "")) // remember the miss, don't retry
+    .finally(() => {
+      glPending.delete(key);
+      saveAvatarCache();
+      // one repaint per burst of lookups instead of one each
+      window.clearTimeout(avatarRepaint);
+      avatarRepaint = window.setTimeout(() => {
+        schedulePaint();
+        if (chatOpen) renderChatMsgs();
+      }, 200);
+    });
+}
+
+// real avatar when we have one, generated identicon otherwise
+function avatarFor(email: string, name: string): string {
+  const mail = (email || "").trim();
+  if (mail && repoHost) {
+    const hit = glAvatars.get(`${repoHost}|${mail.toLowerCase()}`);
+    if (hit) return hit;
+    ensureGitlabAvatar(mail);
+  }
+  return avatarUrl(mail || name);
+}
+
 function avatarUrl(key: string): string {
   const cached = avatarCache.get(key);
   if (cached) return cached;
@@ -5713,6 +5845,7 @@ window.addEventListener("DOMContentLoaded", () => {
       checkForUpdate();
     })
     .catch(() => {});
+  loadAvatarCache();
   renderTabs();
   restoreSession();
   setInterval(pollActive, 1500); // local changes (files/stage/commits/branches)

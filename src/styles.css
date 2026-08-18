@@ -680,6 +680,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-bottom: 1px solid rgba(255,255,255,0.03);
   contain: layout style paint;
 }
+/* each row carries a faint wash of its branch colour (--lane-bg, set per row
+   in JS) so a lane stays identifiable all the way across the message column.
+   Hover and selection are more specific, so they still win. */
+.crow { background: var(--lane-bg, transparent); }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
 .crow.dim .col-msg { opacity: .4; }      /* not in selected lineage */
@@ -1391,6 +1395,20 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #detail-close:hover { color: var(--fg); background: var(--bg3); }
 .d-summary { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+/* author row in the commit detail panel: avatar + name + email */
+.d-author { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.d-av {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  flex: 0 0 auto;
+  background: var(--bg3);
+  object-fit: cover;
+}
+.d-au-txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.d-au-name { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d-au-mail { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* commit message body (the description under the subject) */
 .d-body {
   white-space: pre-wrap;
