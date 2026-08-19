@@ -894,6 +894,9 @@ function renderSidebar(t: Tab) {
     repo.refs.filter((r) => r.kind === "local").map((r) => r.name)
   );
 
+  // Branch lists are grouped on "/" into collapsible folders (kathi/…,
+  // origin/feature/…) so long lists stay scannable, and each list is height
+  // capped + scrollable instead of pushing the other sections off screen.
   const fill = (id: string, countId: string, kind: string) => {
     const ul = $(id);
     ul.innerHTML = "";
@@ -902,86 +905,151 @@ function renderSidebar(t: Tab) {
       // most recently committed first; tie-break by name
       .sort((a, b) => b.time - a.time || a.name.localeCompare(b.name));
     $(countId).textContent = String(list.length);
-    list.forEach((r) => {
-        const li = document.createElement("li");
-        if (r.is_head) li.classList.add("head");
 
-        // remote branch with no local counterpart → "remote only"
-        let remoteOnly = false;
-        if (kind === "remote") {
-          const short = r.name.split("/").slice(1).join("/");
-          remoteOnly = !localNames.has(short);
-        }
-        if (remoteOnly) li.classList.add("remoteonly");
+    const makeRefLi = (r: RefInfo, depth: number): HTMLLIElement => {
+      const leaf = r.name.split("/").pop() ?? r.name;
+      const li = document.createElement("li");
+      if (r.is_head) li.classList.add("head");
 
-        const color = COLORS[Math.abs(hashStr(r.target)) % COLORS.length];
-        const canHide = kind === "local" || kind === "remote";
-        const isHidden = canHide && (t.hidden?.has(refKey(r)) ?? false);
-        if (isHidden) li.classList.add("branch-hidden");
-        li.innerHTML =
-          `<span class="ricon">${icon(kind)}</span>` +
-          `<span class="dot" style="background:${color}"></span>` +
-          `<span class="rname">${escapeHtml(r.name)}</span>` +
-          (r.is_head ? `<span class="here">HEAD</span>` : "") +
-          (remoteOnly ? `<span class="dl" title="not checked out locally">⬇</span>` : "") +
-          (canHide
-            ? `<span class="eye" title="${isHidden ? "Show in graph" : "Hide from graph"}">${icon(isHidden ? "eyeoff" : "eye")}</span>`
-            : "");
-        li.title = r.full + (remoteOnly ? "  (not checked out locally)" : "");
-        li.addEventListener("click", () => {
-          if (r.target) selectNode(findById(t, r.target) ?? null, true);
-        });
-        li.addEventListener("dblclick", () => {
-          const isRemote = r.kind === "remote";
-          const target = isRemote ? r.name.split("/").slice(1).join("/") : r.name;
-          doCheckoutConfirm(t, target, isRemote ? r.name : undefined);
-        });
-        li.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          showMenu(e.clientX, e.clientY, branchMenu(r, repo));
-        });
-        li.querySelector(".eye")?.addEventListener("click", (e) => {
-          e.stopPropagation();
-          toggleBranchHidden(t, refKey(r));
-        });
+      // remote branch with no local counterpart → "remote only"
+      let remoteOnly = false;
+      if (kind === "remote") {
+        const short = r.name.split("/").slice(1).join("/");
+        remoteOnly = !localNames.has(short);
+      }
+      if (remoteOnly) li.classList.add("remoteonly");
 
-        // drag & drop: local AND remote branches can be dragged as the merge
-        // source; only local branches accept drops (you can't commit a merge
-        // into a remote-tracking ref)
-        if (kind === "local" || kind === "remote") {
-          li.draggable = true;
-          li.addEventListener("dragstart", (e) => {
-            dragSource = r.name;
-            dragSourceRemote = kind === "remote";
-            if (e.dataTransfer) {
-              e.dataTransfer.effectAllowed = "move";
-              e.dataTransfer.setData("text/plain", r.name);
-            }
-            li.classList.add("dragging");
-          });
-        }
-        if (kind === "local") {
-          const over = (e: DragEvent) => {
-            if (dragSource && dragSource !== r.name) {
-              e.preventDefault();
-              if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-              li.classList.add("drop-target");
-            }
-          };
-          li.addEventListener("dragenter", over);
-          li.addEventListener("dragover", over);
-          li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
-          li.addEventListener("drop", (e) => {
-            e.preventDefault();
-            li.classList.remove("drop-target");
-            const source = dragSource;
-            const target = r.name;
-            if (!source || source === target) return;
-            showBranchDropMenu(e.clientX, e.clientY, source, target, repo.path);
-          });
-        }
-        ul.appendChild(li);
+      const color = COLORS[Math.abs(hashStr(r.target)) % COLORS.length];
+      const canHide = kind === "local" || kind === "remote";
+      const isHidden = canHide && (t.hidden?.has(refKey(r)) ?? false);
+      if (isHidden) li.classList.add("branch-hidden");
+      li.innerHTML =
+        `<span class="gchev spacer"></span>` +
+        `<span class="ricon">${icon(kind)}</span>` +
+        `<span class="dot" style="background:${color}"></span>` +
+        `<span class="rname">${escapeHtml(r.name)}</span>` +
+        (r.is_head ? `<span class="here">HEAD</span>` : "") +
+        (remoteOnly ? `<span class="dl" title="not checked out locally">⬇</span>` : "") +
+        (canHide
+          ? `<span class="eye" title="${isHidden ? "Show in graph" : "Hide from graph"}">${icon(isHidden ? "eyeoff" : "eye")}</span>`
+          : "");
+      li.title = r.full + (remoteOnly ? "  (not checked out locally)" : "");
+      li.addEventListener("click", () => {
+        if (r.target) selectNode(findById(t, r.target) ?? null, true);
       });
+      li.addEventListener("dblclick", () => {
+        const isRemote = r.kind === "remote";
+        const target = isRemote ? r.name.split("/").slice(1).join("/") : r.name;
+        doCheckoutConfirm(t, target, isRemote ? r.name : undefined);
+      });
+      li.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, branchMenu(r, repo));
+      });
+      li.querySelector(".eye")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleBranchHidden(t, refKey(r));
+      });
+
+      // drag & drop: local AND remote branches can be dragged as the merge
+      // source; only local branches accept drops (you can't commit a merge
+      // into a remote-tracking ref)
+      if (kind === "local" || kind === "remote") {
+        li.draggable = true;
+        li.addEventListener("dragstart", (e) => {
+          dragSource = r.name;
+          dragSourceRemote = kind === "remote";
+          if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", r.name);
+          }
+          li.classList.add("dragging");
+        });
+      }
+      if (kind === "local") {
+        const over = (e: DragEvent) => {
+          if (dragSource && dragSource !== r.name) {
+            e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+            li.classList.add("drop-target");
+          }
+        };
+        li.addEventListener("dragenter", over);
+        li.addEventListener("dragover", over);
+        li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
+        li.addEventListener("drop", (e) => {
+          e.preventDefault();
+          li.classList.remove("drop-target");
+          const source = dragSource;
+          const target = r.name;
+          if (!source || source === target) return;
+          showBranchDropMenu(e.clientX, e.clientY, source, target, repo.path);
+        });
+      }
+      li.style.paddingLeft = `${6 + depth * 14}px`;
+      // the folder already shows the prefix — only the last segment here
+      const nameEl = li.querySelector(".rname");
+      if (nameEl) nameEl.textContent = leaf;
+      return li;
+    };
+
+    // group refs into a folder tree by "/" (leaf = the final segment)
+    interface RefGroup {
+      name: string;
+      path: string;
+      refs: RefInfo[];
+      subs: Map<string, RefGroup>;
+    }
+    const root: RefGroup = { name: "", path: "", refs: [], subs: new Map() };
+    for (const r of list) {
+      const parts = r.name.split("/");
+      let node = root;
+      for (const seg of parts.slice(0, -1)) {
+        const path = node.path ? `${node.path}/${seg}` : seg;
+        let next = node.subs.get(seg);
+        if (!next) {
+          next = { name: seg, path, refs: [], subs: new Map() };
+          node.subs.set(seg, next);
+        }
+        node = next;
+      }
+      node.refs.push(r);
+    }
+
+    // total refs under a folder, including nested ones
+    const countRefs = (g: { refs: RefInfo[]; subs: Map<string, unknown> }): number => {
+      let n = g.refs.length;
+      for (const sub of g.subs.values())
+        n += countRefs(sub as { refs: RefInfo[]; subs: Map<string, unknown> });
+      return n;
+    };
+
+    const collapsed = getCollapsedGroups();
+    const walk = (node: RefGroup, depth: number) => {
+      for (const g of node.subs.values()) {
+        const key = `${kind}:${g.path}`;
+        const isShut = collapsed.has(key);
+        const gli = document.createElement("li");
+        gli.className = "rgroup" + (isShut ? " shut" : "");
+        gli.style.paddingLeft = `${6 + depth * 14}px`;
+        gli.innerHTML =
+          `<span class="gchev">${isShut ? "▸" : "▾"}</span>` +
+          `<span class="ricon">${icon("folder")}</span>` +
+          `<span class="rname">${escapeHtml(g.name)}</span>` +
+          `<span class="gcount">${countRefs(g)}</span>`;
+        gli.title = g.path;
+        gli.addEventListener("click", (e) => {
+          e.stopPropagation();
+          toggleCollapsedGroup(key);
+          renderSidebar(t);
+        });
+        ul.appendChild(gli);
+        if (!isShut) walk(g, depth + 1);
+      }
+      for (const r of node.refs) ul.appendChild(makeRefLi(r, depth));
+    };
+    walk(root, 0);
+
     if (!ul.children.length) {
       ul.innerHTML = `<li class="muted empty-mini">none</li>`;
     }
@@ -1126,6 +1194,89 @@ function buildRefColumn(refsHere: RefInfo[]): string {
   return html;
 }
 
+// ---- column visibility (gear in the graph header) ----
+// Toggling only flips classes on #graphpane; CSS hides the pieces, so nothing
+// needs re-rendering and the change is instant even on huge repos.
+const COLUMNS: { key: string; label: string }[] = [
+  { key: "refs", label: "Branch / Tag" },
+  { key: "graph", label: "Graph" },
+  { key: "message", label: "Commit message" },
+  { key: "author", label: "Author" },
+  { key: "date", label: "Date / Time" },
+  { key: "sha", label: "Sha" },
+];
+const LS_COLUMNS = "jkt.columns";
+const DEFAULT_COLUMNS = COLUMNS.map((c) => c.key); // everything on by default
+
+function getColumns(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS_COLUMNS);
+    if (raw) return new Set(JSON.parse(raw) as string[]);
+  } catch {}
+  return new Set(DEFAULT_COLUMNS);
+}
+function setColumns(cols: Set<string>) {
+  try {
+    localStorage.setItem(LS_COLUMNS, JSON.stringify([...cols]));
+  } catch {}
+  applyColumns();
+}
+function applyColumns() {
+  const on = getColumns();
+  const pane = $("graphpane");
+  for (const c of COLUMNS) pane.classList.toggle(`hide-${c.key}`, !on.has(c.key));
+  // the graph is a sized column, so its width has to be recomputed
+  const t = cur();
+  if (t) renderGraph(t);
+}
+
+function showColumnMenu(x: number, y: number) {
+  const on = getColumns();
+  const items: MenuItem[] = COLUMNS.map((c) => ({
+    label: c.label,
+    checked: on.has(c.key),
+    keepOpen: true, // flip several without the menu closing
+    action: () => {
+      const cur = getColumns();
+      if (cur.has(c.key)) cur.delete(c.key);
+      else cur.add(c.key);
+      setColumns(cur);
+      showColumnMenu(x, y); // redraw so the ticks update in place
+    },
+  }));
+  items.push({ separator: true });
+  items.push({
+    label: "Compact graph column",
+    checked: compactGraph,
+    keepOpen: true,
+    action: () => {
+      setCompactGraph(!compactGraph);
+      showColumnMenu(x, y);
+    },
+  });
+  items.push({ separator: true });
+  items.push({
+    label: "Reset columns to default",
+    action: () => {
+      setColumns(new Set(DEFAULT_COLUMNS));
+      setCompactGraph(false);
+    },
+  });
+  showMenu(x, y, items);
+}
+
+// narrower graph column for people who want the messages to dominate
+const LS_COMPACT = "jkt.compactgraph";
+let compactGraph = localStorage.getItem(LS_COMPACT) === "1";
+function setCompactGraph(on: boolean) {
+  compactGraph = on;
+  try {
+    localStorage.setItem(LS_COMPACT, on ? "1" : "0");
+  } catch {}
+  const t = cur();
+  if (t) renderGraph(t);
+}
+
 // ---- virtualized graph rendering ----
 interface GCtx {
   tab: Tab;
@@ -1242,7 +1393,7 @@ function renderGraph(t: Tab) {
 
   // lanes keep their full width; the column just shows a window onto them
   const graphFullW = laneX(maxLane) + PAD;
-  const graphViewW = Math.min(graphFullW, GRAPH_VIEW_MAX);
+  const graphViewW = Math.min(graphFullW, compactGraph ? 140 : GRAPH_VIEW_MAX);
   const totalH = placed.length * ROW_H;
   graphPanX = Math.max(0, Math.min(graphPanX, graphFullW - graphViewW));
 
@@ -2529,6 +2680,25 @@ async function restoreSession() {
     refreshRemoteTags(t);
     if (t.stale) reloadActive(); // refresh the visible tab in the background
   }
+}
+
+// which "/" folders in the branch lists are collapsed (own key so it doesn't
+// clash with the sidebar SECTION collapse state)
+const LS_GROUPS = "jkt.refgroups";
+function getCollapsedGroups(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(LS_GROUPS) ?? "[]"));
+  } catch {
+    return new Set();
+  }
+}
+function toggleCollapsedGroup(key: string) {
+  const set = getCollapsedGroups();
+  if (set.has(key)) set.delete(key);
+  else set.add(key);
+  try {
+    localStorage.setItem(LS_GROUPS, JSON.stringify([...set]));
+  } catch {}
 }
 
 function getCollapsed(): Set<string> {
@@ -5008,6 +5178,8 @@ interface MenuItem {
   label?: string;
   action?: () => void;
   separator?: boolean;
+  checked?: boolean; // renders a tick column; undefined = plain item
+  keepOpen?: boolean; // toggles stay open so several can be flipped at once
 }
 function showMenu(x: number, y: number, items: MenuItem[]) {
   closeMenu();
@@ -5023,8 +5195,21 @@ function showMenu(x: number, y: number, items: MenuItem[]) {
     }
     const row = document.createElement("div");
     row.className = "ctxitem";
-    row.textContent = it.label ?? "";
-    row.addEventListener("click", () => {
+    // a menu with any checkable item reserves a tick column so labels align
+    if (items.some((m) => m.checked !== undefined)) {
+      row.classList.add("checkable");
+      row.innerHTML =
+        `<span class="ctxtick">${it.checked ? "✓" : ""}</span>` +
+        `<span>${escapeHtml(it.label ?? "")}</span>`;
+    } else {
+      row.textContent = it.label ?? "";
+    }
+    row.addEventListener("click", (e) => {
+      if (it.keepOpen) {
+        e.stopPropagation();
+        it.action?.();
+        return;
+      }
       closeMenu();
       it.action?.();
     });
@@ -5436,6 +5621,7 @@ const ICONS: Record<string, string> = {
   tag: `<path d="M2.6 7.6V3.1a.5.5 0 0 1 .5-.5h4.5l5.3 5.3a1 1 0 0 1 0 1.4l-3.1 3.1a1 1 0 0 1-1.4 0z"/><circle cx="5" cy="5" r=".7"/>`,
   stash: `<rect x="2.5" y="4" width="11" height="8" rx="1"/><path d="M2.5 8h3l1 1.4h3L13.5 8"/>`,
   eye: `<path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>`,
+  folder: `<path d="M1.8 12.5V4.2a.7.7 0 0 1 .7-.7h3.1l1.4 1.6h5.7a.7.7 0 0 1 .7.7v6.7a.7.7 0 0 1-.7.7H2.5a.7.7 0 0 1-.7-.7z"/>`,
   submodule: `<rect x="2" y="2" width="5.5" height="5.5" rx="1"/><rect x="8.5" y="2" width="5.5" height="5.5" rx="1"/><rect x="5.2" y="8.5" width="5.5" height="5.5" rx="1"/>`,
   eyeoff: `<path d="M2 2l12 12"/><path d="M6.7 6.7a2 2 0 0 0 2.6 2.6"/><path d="M9.8 3.6A6 6 0 0 1 14.5 8a12 12 0 0 1-1.4 1.9"/><path d="M3.9 3.9A11 11 0 0 0 1.5 8S4 12.5 8 12.5a6 6 0 0 0 2.3-.45"/>`,
 };
@@ -5776,6 +5962,12 @@ window.addEventListener("DOMContentLoaded", () => {
       e.preventDefault();
       stepHistEntry(-1); // newer
     }
+  });
+  applyColumns(); // restore which columns are visible
+  $("col-gear").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const r = ($("col-gear") as HTMLElement).getBoundingClientRect();
+    showColumnMenu(r.right - 4, r.bottom + 4);
   });
   setupGraphPan(); // graph column scrolls sideways on its own
   linkHistScroll(); // list <-> graph proportional scroll in file-history split

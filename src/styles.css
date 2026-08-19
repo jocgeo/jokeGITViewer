@@ -529,7 +529,33 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-variant-numeric: tabular-nums;
 }
 .side-section.collapsed .reflist { display: none; }
-.reflist { list-style: none; margin: 0; padding: 0; }
+/* Each branch list is height-capped (~15 rows) and scrolls on its own, so a
+   repo with 100 branches can't push the other sections off screen. */
+.reflist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 330px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* "/" folder rows inside the branch lists */
+.reflist li.rgroup { color: var(--muted); gap: 4px; }
+.reflist li.rgroup .rname { color: var(--fg); opacity: 0.85; }
+.reflist .gchev { flex: 0 0 9px; font-size: 9px; opacity: 0.8; }
+/* leaf rows carry an EMPTY chevron so their icon lines up one indent step to
+   the right of the parent folder's icon (otherwise levels look identical) */
+.reflist .gchev.spacer { visibility: hidden; }
+/* faint guide so a folder's children read as belonging to it */
+.reflist li.rgroup { border-left: 2px solid transparent; }
+.reflist li.rgroup:not(.shut) { border-left-color: var(--border); }
+.reflist li.rgroup .gcount {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.6;
+  padding-left: 6px;
+}
 .reflist li {
   padding: 3px 6px;
   border-radius: 4px;
@@ -600,7 +626,39 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 /* file-history split: graph on the left, the file's diff on the right */
 #graphpane.hist-split { flex-direction: row; }
-#graphpane.hist-split > #scroll { flex: 1 1 44%; min-width: 0; }
+#graphpane.hist-split > /* gear + column-visibility rules (classes live on #graphpane) */
+.ch-msg { display: flex; align-items: center; gap: 8px; }
+.ch-msg .ch-lbl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+#col-gear {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  line-height: 18px;
+  font-size: 13px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: 4px;
+}
+#col-gear:hover { color: var(--fg); border-color: var(--border); background: var(--bg3); }
+
+#graphpane.hide-refs .col-msg .refs { display: none; }
+/* with the message hidden, let the author absorb the free space so the
+   date/sha stay right-aligned instead of bunching up on the left */
+#graphpane.hide-message .col-msg .summary { display: none; }
+#graphpane.hide-message .col-msg .author { margin-right: auto; }
+#graphpane.hide-author .col-msg .author { display: none; }
+#graphpane.hide-date .col-msg .date { display: none; }
+#graphpane.hide-sha .col-msg .hash { display: none; }
+#graphpane.hide-graph .col-graph,
+#graphpane.hide-graph #graph-svg,
+#graphpane.hide-graph .ch-graph { display: none; }
+
+/* checkable context-menu rows (column settings) */
+.ctxitem.checkable { display: flex; align-items: center; gap: 8px; }
+.ctxitem .ctxtick { flex: 0 0 12px; color: var(--accent); font-weight: 700; }
+.ctxitem.checkable:hover .ctxtick { color: #0a0a12; }
+
+#scroll { flex: 1 1 44%; min-width: 0; }
 #graphpane.hist-split > #diffview {
   flex: 1 1 56%;
   min-width: 0;
