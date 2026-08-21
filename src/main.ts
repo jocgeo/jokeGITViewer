@@ -525,18 +525,25 @@ function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
       }
     }
 
-    let chain = chainOf.get(n.id);
-    if (chain === undefined) chain = nextChain++; // a new branch tip starts here
-    // the FIRST child (topmost in the graph) continues the chain through its
-    // first parent; stash/WIP nodes never claim — they'd recolor the branch
-    if (n.kind === "commit" && n.parents.length && !chainOf.has(n.parents[0])) {
-      chainOf.set(n.parents[0], chain);
-    }
-
     maxLane = Math.max(maxLane, lane, lanes.length - 1);
-    let color = COLORS[chain % COLORS.length];
-    if (n.kind === "stash") color = STASH_COLOR;
-    if (n.kind === "wip") color = WIP_COLOR;
+    // Only COMMITS take a chain slot. Stash/WIP have their own fixed colours,
+    // and letting them consume a slot shifted every branch one step along the
+    // palette whenever the WIP node appeared or disappeared — so committing
+    // recoloured the whole graph.
+    let color: string;
+    if (n.kind === "stash") {
+      color = STASH_COLOR;
+    } else if (n.kind === "wip") {
+      color = WIP_COLOR;
+    } else {
+      let chain = chainOf.get(n.id);
+      if (chain === undefined) chain = nextChain++; // a new branch tip starts here
+      // the first (topmost) child carries the chain on through its first parent
+      if (n.parents.length && !chainOf.has(n.parents[0])) {
+        chainOf.set(n.parents[0], chain);
+      }
+      color = COLORS[chain % COLORS.length];
+    }
     placed.push({ node: n, row, lane, color });
   });
 
