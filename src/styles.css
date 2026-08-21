@@ -744,8 +744,19 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .crow { background: var(--lane-bg, transparent); }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
-.crow.dim .col-msg { opacity: .4; }      /* not in selected lineage */
-.crow.dim-mid .col-msg { opacity: .75; }  /* ancestor that led here */
+/* the checked-out branch: its rows carry a left marker so the current branch
+   is findable without clicking anything */
+.crow.on-head { box-shadow: inset 3px 0 0 0 var(--accent); }
+.crow.on-head .col-msg .summary { font-weight: 600; }
+/* commits that live in no LOCAL branch (remote-only work) read as provisional */
+.crow.remote-only .col-msg .summary { font-style: italic; opacity: 0.82; }
+/* two levels only: in the selected history, or clearly not. Rows outside it
+   lose their lane tint as well, so the highlighted history is the only thing
+   with colour on it. */
+.crow.dim .col-msg { opacity: .32; }
+.crow.dim { --lane-bg: transparent; }
+.crow.dim.on-head { box-shadow: none; }
+.crow.dim.on-head .col-msg .summary { font-weight: 400; }
 
 /* ref pills now sit inline, directly before the commit message. Capped width
    so a long branch name can never crowd out the message text. */

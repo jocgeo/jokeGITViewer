@@ -1285,6 +1285,9 @@ interface GCtx {
   refsByHash: Map<string, RefInfo[]>;
   graphViewW: number; // visible width of the graph column
   graphFullW: number; // width all lanes would need
+  headChain: Set<string>;   // the checked-out branch (first-parent from HEAD)
+  forks: Set<string>;       // commits a branch diverges FROM (>=2 children)
+  localReach: Set<string>;  // reachable from some LOCAL branch or HEAD
 }
 let gctx: GCtx | null = null;
 let paintQueued = false;
@@ -1391,9 +1394,52 @@ function renderGraph(t: Tab) {
     refsByHash.set(r.target, arr);
   }
 
-  // lanes keep their full width; the column just shows a window onto them
+  // ---- scannability sets (independent of what is selected) ----
+  // the checked-out branch: first-parent chain down from HEAD
+  const headChain = new Set<string>();
+  {
+    let h: string | undefined = repo.head;
+    while (h && byId.has(h) && !headChain.has(h)) {
+      headChain.add(h);
+      h = byId.get(h)!.node.parents[0];
+    }
+  }
+  // fork points: a commit several branches grow out of (>= 2 children here)
+  const childCount = new Map<string, number>();
+  for (const p of placed)
+    for (const par of p.node.parents)
+      if (byId.has(par)) childCount.set(par, (childCount.get(par) ?? 0) + 1);
+  const forks = new Set<string>();
+  for (const [h, n] of childCount) if (n > 1) forks.add(h);
+  // everything reachable from a LOCAL branch (or HEAD). Commits outside this
+  // exist only on remote branches — work that is in no local branch of yours.
+  const localReach = new Set<string>();
+  {
+    const stack = [
+      ...repo.refs.filter((r) => r.kind === "local").map((r) => r.target),
+      repo.head,
+    ].filter((h) => h && byId.has(h));
+    while (stack.length) {
+      const h = stack.pop()!;
+      if (localReach.has(h)) continue;
+      localReach.add(h);
+      for (const par of byId.get(h)!.node.parents) if (byId.has(par)) stack.push(par);
+    }
+  }
+
+  // Width: sizing to the deepest lane in the WHOLE repo leaves a big empty gap
+  // between the dots and the messages. Size to the 97th percentile instead —
+  // the rare deep lanes are still reachable via the sideways scroll.
+  const laneSorted = placed.map((p) => p.lane).sort((a, b) => a - b);
+  const pct = laneSorted.length
+    ? laneSorted[Math.min(laneSorted.length - 1, Math.floor(laneSorted.length * 0.97))]
+    : 0;
+  const shownLane = Math.max(2, Math.min(maxLane, pct + 1));
   const graphFullW = laneX(maxLane) + PAD;
-  const graphViewW = Math.min(graphFullW, compactGraph ? 140 : GRAPH_VIEW_MAX);
+  const graphViewW = Math.min(
+    laneX(shownLane) + PAD,
+    compactGraph ? 140 : GRAPH_VIEW_MAX
+  );
   const totalH = placed.length * ROW_H;
   graphPanX = Math.max(0, Math.min(graphPanX, graphFullW - graphViewW));
 
@@ -1414,7 +1460,7 @@ function renderGraph(t: Tab) {
   $("graph-content").style.minWidth = `${contentW}px`;
   $("col-headers").style.minWidth = `${contentW}px`;
 
-  gctx = { tab: t, placed, byId, refsByHash, graphViewW, graphFullW };
+  gctx = { tab: t, placed, byId, refsByHash, graphViewW, graphFullW, headChain, forks, localReach };
   updateGraphHBar();
   $("empty").classList.add("hidden");
   paintViewport();
@@ -1423,81 +1469,57 @@ function renderGraph(t: Tab) {
 // render only the rows/nodes/edges visible in the scroll viewport
 function paintViewport() {
   if (!gctx) return;
-  const { tab: t, placed, byId, refsByHash, graphViewW } = gctx;
+  const { tab: t, placed, byId, refsByHash, graphViewW, headChain, forks, localReach } = gctx;
   const repo = t.repo;
 
   // lineage: highlight the whole branch line — ancestors AND descendants
   // (so you can see where this commit's branch head is), dim the rest.
-  // 3-level highlight when a node is selected:
-  //  2 = the branch line (first-parent chain, up + down to the head)
-  //  1 = every other commit that led here (all ancestors via any parent)
-  //  0 = unrelated -> dimmed
-  let branchLine: Set<string> | null = null;
-  let connected: Set<string> | null = null; // ancestors + all descendants
+  // TWO highlight levels only, so "is this commit part of the selected
+  // history or not" is unambiguous:
+  //   in  = the selected commit's full history — every ancestor that led to it
+  //         plus every descendant it contributes to (through merges included)
+  //   out = nothing to do with it -> clearly dimmed
+  let inHistory: Set<string> | null = null;
   if (t.selected && !t.hlOff && byId.has(t.selected)) {
-    branchLine = new Set<string>();
-    connected = new Set<string>();
-    // children maps: first-parent (branch line) and all-parent (full descendants)
-    const childFP = new Map<string, string[]>();
+    inHistory = new Set<string>();
+    // children by ANY parent, so merged-in work counts as contributing
     const childAll = new Map<string, string[]>();
     for (const p of placed) {
-      p.node.parents.forEach((par, idx) => {
-        if (!byId.has(par)) return;
+      for (const par of p.node.parents) {
+        if (!byId.has(par)) continue;
         (childAll.get(par) ?? childAll.set(par, []).get(par)!).push(p.node.id);
-        if (idx === 0) (childFP.get(par) ?? childFP.set(par, []).get(par)!).push(p.node.id);
-      });
+      }
     }
-    // branch line: first-parent ancestors
-    let c2: string | undefined = t.selected;
-    while (c2 && !branchLine.has(c2)) {
-      branchLine.add(c2);
-      const fp: string | undefined = byId.get(c2)?.node.parents[0];
-      c2 = fp && byId.has(fp) ? fp : undefined;
-    }
-    // branch line: first-parent descendants (to the head)
-    const fp = [t.selected];
-    const seenFP = new Set<string>();
-    while (fp.length) {
-      const id = fp.pop()!;
-      if (seenFP.has(id)) continue;
-      seenFP.add(id);
-      branchLine.add(id);
-      for (const ch of childFP.get(id) ?? []) fp.push(ch);
-    }
-    // connected: all ancestors (led here) + all descendants (everywhere it contributes)
-    const up = [t.selected];
+    const up = [t.selected]; // everything this commit is built on
     while (up.length) {
       const id = up.pop()!;
-      if (connected.has(id)) continue;
-      connected.add(id);
-      const pp = byId.get(id);
-      if (pp) for (const par of pp.node.parents) if (byId.has(par)) up.push(par);
+      if (inHistory.has(id)) continue;
+      inHistory.add(id);
+      for (const par of byId.get(id)?.node.parents ?? [])
+        if (byId.has(par)) up.push(par);
     }
-    const down = [t.selected];
-    const seenDn = new Set<string>();
+    const down = [t.selected]; // everywhere it ended up
+    const seen = new Set<string>();
     while (down.length) {
       const id = down.pop()!;
-      if (seenDn.has(id)) continue;
-      seenDn.add(id);
-      connected.add(id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      inHistory.add(id);
       for (const ch of childAll.get(id) ?? []) down.push(ch);
     }
   }
   const levelOf = (id: string): number => {
     // file-history highlight overrides: only file-changing commits are bright
     if (fileHistoryHL) return fileHistoryHL.has(id) ? 2 : 0;
-    return branchLine === null ? 2 : branchLine.has(id) ? 2 : connected!.has(id) ? 1 : 0;
+    return inHistory === null || inHistory.has(id) ? 2 : 0;
   };
-  // Edges are drawn in the SAME colour as their branch's nodes, but faded:
-  // the dots carry the emphasis and the lines just trace the connection, so
-  // the lanes read as structure instead of competing with the commits.
+  // In-history edges are strong; unrelated ones nearly disappear.
   const edgeOp = (a: string, b: string) => {
     const l = Math.min(levelOf(a), levelOf(b));
-    return l === 2 ? ` opacity="0.5"` : l === 1 ? ` opacity="0.3"` : ` opacity="0.1"`;
+    return l === 2 ? ` opacity="0.75"` : ` opacity="0.08"`;
   };
   const nodeOp = (id: string) => {
-    const l = levelOf(id);
-    return l === 2 ? "" : l === 1 ? ` opacity="0.55"` : ` opacity="0.16"`;
+    return levelOf(id) === 2 ? "" : ` opacity="0.14"`;
   };
 
   const scroll = $("scroll");
@@ -1586,8 +1608,13 @@ function paintViewport() {
         }
       }
       const dash = p.node.kind !== "commit" ? ` stroke-dasharray="3 3"` : "";
+      // the current branch is the spine of the graph: thicker and unfaded
+      // the current branch stays thicker, but dimming still wins so the
+      // selected history is the only thing that reads as "on"
+      const onHead = headChain.has(p.node.id) && headChain.has(ph);
       const op = edgeOp(p.node.id, ph);
-      parts.push(`<path d="${d}" fill="none" stroke="${pp.color}" stroke-width="2"${dash}${op}/>`);
+      const w = onHead ? 3 : 2;
+      parts.push(`<path d="${d}" fill="none" stroke="${pp.color}" stroke-width="${w}"${dash}${op}/>`);
     }
   }
   for (let i = start; i < end; i++) {
@@ -1613,10 +1640,22 @@ function paintViewport() {
         const r = tip ? TIP_SZ / 2 + 3 : NODE_R + Math.max(2, NODE_R * 0.6);
         parts.push(`<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${stroke}" stroke-width="1.5"${op}/>`);
       }
+      const isFork = forks.has(c.hash); // a branch diverges here
+      const remoteOnly = !localReach.has(c.hash); // in no local branch
       const who = `${c.author} <${c.email}>`;
       const title = `<title>${escapeHtml(
-        tip ? `${refsHere.map((r) => r.name).join(", ")} — ${who}` : who
+        (tip ? `${refsHere.map((r) => r.name).join(", ")} — ` : "") +
+          who +
+          (isFork ? "  ·  branch point" : "") +
+          (remoteOnly ? "  ·  not in any local branch" : "")
       )}</title>`;
+      // fork point: outer ring showing this is where branches split off
+      if (isFork) {
+        parts.push(
+          `<circle cx="${x}" cy="${y}" r="${NODE_R + 3.5}" fill="none" ` +
+            `stroke="${p.color}" stroke-width="1.2" opacity="0.65"${op}/>`
+        );
+      }
       if (tip) {
         const half = TIP_SZ / 2;
         const gs = (TIP_SZ / 16) * 0.72; // glyph scale inside the badge
@@ -1630,8 +1669,10 @@ function paintViewport() {
             `${ICONS[tip] ?? ""}</g>${title}</g>`
         );
       } else {
+        const fill = isMerge || remoteOnly ? "#1e1e2a" : p.color;
+        const dashed = remoteOnly ? ` stroke-dasharray="2.2 2"` : "";
         parts.push(
-          `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${isMerge ? "#1e1e2a" : p.color}" stroke="${p.color}" stroke-width="2"${op}>` +
+          `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${fill}" stroke="${p.color}" stroke-width="2"${dashed}${op}>` +
             title +
             `</circle>`
         );
@@ -1651,12 +1692,13 @@ function paintViewport() {
     row.dataset.id = n.id;
     row.style.top = `${p.row * ROW_H}px`;
     // faint wash of the branch's colour so each lane is readable across the
-    // whole row, not just at the dot
-    row.style.setProperty("--lane-bg", laneTint(p.color, 0.1));
+    // whole row, not just at the dot — stronger on the checked-out branch
+    const onHeadRow = headChain.has(n.id);
+    row.style.setProperty("--lane-bg", laneTint(p.color, onHeadRow ? 0.2 : 0.08));
+    if (onHeadRow) row.classList.add("on-head");
+    if (n.kind === "commit" && !localReach.has(n.id)) row.classList.add("remote-only");
     if (n.id === t.selected) row.classList.add("selected");
-    const lvl = levelOf(n.id);
-    if (lvl === 0) row.classList.add("dim");
-    else if (lvl === 1) row.classList.add("dim-mid");
+    if (levelOf(n.id) === 0) row.classList.add("dim");
 
     let refHtml = "";
     let msgHtml = "";
