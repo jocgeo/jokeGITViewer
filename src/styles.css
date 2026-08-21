@@ -836,11 +836,20 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .col-msg .badge[data-refkind="local"] { cursor: grab; }
 .badge.drop-target { outline: 1px dashed var(--accent); outline-offset: 1px; background: var(--sel); }
-/* muted badge fills — refs are labels, not the main content. The CURRENT
-   branch is the one that gets to be bright. */
-.badge.local { background: #24313f; color: #8fb3d9; border-color: #33455a; }
-.badge.remote { background: #2f2739; color: #b79bd0; border-color: #443859; }
-.badge.tag { background: #3b3226; color: #d9b783; border-color: #55452f; }
+/* Badges carry their LANE's colour (--bc, set per row), so a pill visibly
+   belongs to a line in the graph instead of blending into the message text. */
+.badge.local,
+.badge.remote,
+.badge.tag {
+  background: var(--bc-bg, #24313f);
+  border-color: var(--bc-bd, #33455a);
+  color: var(--fg);
+}
+.badge .bpre { opacity: 0.55; }               /* origin/group/ prefix */
+.badge .bleaf { font-weight: 600; }           /* the branch name itself */
+.badge .ic { color: var(--bc, var(--muted)); opacity: 0.9; }
+/* remote-only pills read a touch lighter than checked-out ones */
+.badge.remote { border-style: dashed; }
 .badge.head { background: #e8e8ef; color: #0a0a12; font-weight: 700; }
 .badge.current {
   background: #2f4460;

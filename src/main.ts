@@ -1141,7 +1141,7 @@ let gRemoteTags = new Set<string>(); // tags on origin, for the active render
 let dragSource: string | null = null; // branch being dragged (drag & drop)
 let dragSourceRemote = false; // dragged branch is a remote-tracking ref
 
-function unitBadge(u: RefUnit): string {
+function unitBadge(u: RefUnit, laneColor?: string): string {
   let icons =
     (u.local ? icon("local") : "") +
     (u.remote ? icon("remote") : "") +
@@ -1156,10 +1156,33 @@ function unitBadge(u: RefUnit): string {
   }
   const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
   const check = u.isHead ? `<span class="bcheck">✓</span>` : "";
+  // long refs like origin/hohmic/vincorion_final_setup drowned the message;
+  // dim the path prefix and keep the actual branch name at full strength
+  const cut = u.name.lastIndexOf("/");
+  const label =
+    cut > 0
+      ? `<span class="bpre">${escapeHtml(u.name.slice(0, cut + 1))}</span>` +
+        `<span class="bleaf">${escapeHtml(u.name.slice(cut + 1))}</span>`
+      : `<span class="bleaf">${escapeHtml(u.name)}</span>`;
+  // concrete rgba values instead of CSS color-mix(): works on every WebView2
+  const tint = laneColor
+    ? ` style="--bc:${laneColor};--bc-bg:${laneTint(laneColor, 0.22)};` +
+      `--bc-bd:${laneTint(laneColor, 0.6)}"`
+    : "";
+  // the pill is width-capped and ellipsised, so hovering has to give the full
+  // name back — plus where it exists (local / origin / tag)
+  const where = [
+    u.local ? "local" : "",
+    u.remote ? "on origin" : "",
+    u.tag ? "tag" : "",
+    u.isHead ? "checked out" : "",
+  ].filter(Boolean);
+  const tip = `${u.name}  (${where.join(" · ")})`;
   return (
-    `<span class="badge ${cls}${u.isHead ? " current" : ""}" ` +
+    `<span class="badge ${cls}${u.isHead ? " current" : ""}"${tint} ` +
+    `title="${escapeHtml(tip)}" ` +
     `data-refname="${escapeHtml(u.ref.name)}" data-refkind="${u.ref.kind}">` +
-    `${check}${icons}${escapeHtml(u.name)}${extra}</span>`
+    `${check}${icons}${label}${extra}</span>`
   );
 }
 
@@ -1179,7 +1202,7 @@ async function refreshRemoteTags(t: Tab) {
 
 // branches: primary (current if present, else first) + "+N" pill.
 // tags: always shown as their own badges so they're easy to spot.
-function buildRefColumn(refsHere: RefInfo[]): string {
+function buildRefColumn(refsHere: RefInfo[], laneColor?: string): string {
   const units = refUnits(refsHere);
   if (!units.length) return "";
   const branches = units.filter((u) => !u.tag);
@@ -1189,7 +1212,7 @@ function buildRefColumn(refsHere: RefInfo[]): string {
   if (branches.length) {
     let pi = branches.findIndex((u) => u.isHead);
     if (pi < 0) pi = 0;
-    html += unitBadge(branches[pi]);
+    html += unitBadge(branches[pi], laneColor);
     const others = branches.filter((_, i) => i !== pi);
     if (others.length) {
       const title = others.map((u) => u.name).join("\n");
@@ -1197,7 +1220,7 @@ function buildRefColumn(refsHere: RefInfo[]): string {
     }
   }
   // all tags, always visible (rendered last = nearest the graph)
-  html += tags.map(unitBadge).join("");
+  html += tags.map((u) => unitBadge(u, laneColor)).join("");
   return html;
 }
 
@@ -1731,7 +1754,7 @@ function paintViewport() {
       refHtml =
         (c.hash === repo.head && !repo.head_branch
           ? `<span class="badge detached">HEAD · detached</span>`
-          : "") + buildRefColumn(here);
+          : "") + buildRefColumn(here, p.color);
       if (
         t.hint &&
         t.hint.hash === c.hash &&
