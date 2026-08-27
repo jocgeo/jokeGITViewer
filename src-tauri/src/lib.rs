@@ -492,6 +492,24 @@ fn load_refs(repo: &str) -> Result<Vec<RefInfo>, String> {
             time,
         });
     }
+    // A repo with no commits has no refs at all, yet HEAD already names the
+    // branch the first commit will create. Show it, otherwise a fresh clone
+    // looks like it has no branch whatsoever.
+    if refs.is_empty() {
+        if let Ok(name) = git(repo, &["symbolic-ref", "--short", "HEAD"]) {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                refs.push(RefInfo {
+                    full: format!("refs/heads/{name}"),
+                    name,
+                    target: String::new(), // no commit yet
+                    kind: "local".to_string(),
+                    is_head: true,
+                    time: 0,
+                });
+            }
+        }
+    }
     Ok(refs)
 }
 
@@ -504,6 +522,11 @@ fn load_commits(repo: &str, limit: u32) -> Result<Vec<Commit>, String> {
     // each stash's hidden internal commits (the "index on ..." / "untracked
     // files on ..." / "WIP on ..." entries) into the graph as junk rows.
     // Stashes are shown separately as their own nodes.
+    // A freshly created repo has no commits, so HEAD is unborn and passing it
+    // makes `git log` fail outright ("ambiguous argument 'HEAD'").
+    if git(repo, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
     let raw = git(
         repo,
         &[
@@ -1165,6 +1188,15 @@ async fn chat_send(path: String, text: String) -> Result<Vec<ChatMsg>, String> {
         }
     }
     Err(format!("could not send (push kept being rejected): {last_err}"))
+}
+
+// Create a repository in an existing folder.
+#[tauri::command]
+async fn init_repo(path: String) -> Result<(), String> {
+    if is_repo(&path) {
+        return Err("that folder is already a git repository".to_string());
+    }
+    git(&path, &["init"]).map(|_| ())
 }
 
 // Clone a repository into `dest` and return the path of the new repo folder.
@@ -2139,6 +2171,7 @@ pub fn run() {
             gitlab_avatar,
             diff_worktree_to_commit,
             clone_repo,
+            init_repo,
             chat_pull,
             chat_send,
             wip_status,

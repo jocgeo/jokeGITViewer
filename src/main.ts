@@ -1540,7 +1540,14 @@ function renderGraph(t: Tab) {
 
   gctx = { tab: t, placed, byId, refsByHash, graphViewW, graphFullW, headChain, forks, localReach };
   updateGraphHBar();
-  $("empty").classList.add("hidden");
+  // a repo with no commits is valid, just empty — say so instead of a blank pane
+  if (!placed.length) {
+    $("empty").textContent =
+      "No commits yet — add a file, stage it and make the first commit.";
+    $("empty").classList.remove("hidden");
+  } else {
+    $("empty").classList.add("hidden");
+  }
   paintViewport();
 }
 
@@ -2649,6 +2656,21 @@ async function openRepo() {
   });
   if (!picked || Array.isArray(picked)) return;
   await loadRepo(picked);
+}
+
+async function doInit() {
+  const dir = await open({
+    directory: true,
+    title: "Select a folder for the new repository",
+  });
+  if (!dir || Array.isArray(dir)) return;
+  try {
+    await invoke("init_repo", { path: dir });
+    await loadRepo(dir);
+    setStatus(`Initialised ${basename(dir)}`);
+  } catch (e) {
+    errorModal("Init failed:" + String.fromCharCode(10) + String(e));
+  }
 }
 
 async function doClone() {
@@ -6202,6 +6224,7 @@ function renderUnifiedDiff(diff: string): string {
 window.addEventListener("DOMContentLoaded", () => {
   $("open-btn").addEventListener("click", openRepo);
   $("clone-btn").addEventListener("click", doClone);
+  $("init-btn").addEventListener("click", doInit);
   $("fetch-btn").addEventListener("click", doFetch);
   $("pull-btn").addEventListener("click", doPull);
   $("push-btn").addEventListener("click", doPush);

@@ -94,32 +94,22 @@ jobs:
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # RELEASES_TOKEN is a fine-grained PAT with Contents:read+write on the
+          # downloads repo only. GITHUB_TOKEN cannot reach another repository.
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
           # code-signing key for the auto-updater (set these as repo secrets)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # publish into the public downloads repo; the source repo can go private
+          owner: jocgeo
+          repo: jokeGitViewer-Releases
           tagName: ${{ github.ref_name }}
           releaseName: "jokeGITViewer ${{ github.ref_name }}"
           releaseBody: ${{ steps.changelog.outputs.body }}
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          # attaches the raw exe too — replaces the manual upload step
+          uploadPlainBinary: true
           args: ${{ matrix.args }}
-
-      # The installers above don't include the raw standalone exe. Attach the
-      # portable Windows build (runs without installing).
-      - name: Upload standalone Windows exe
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          V="${GITHUB_REF_NAME#v}"
-          # raw binary is named after the cargo package ("jkt"), pick it robustly
-          src="src-tauri/target/release/jkt.exe"
-          [ -f "$src" ] || src="$(find src-tauri/target/release -maxdepth 1 -name '*.exe' ! -name '*setup*' | head -1)"
-          echo "standalone exe: $src"
-          out="jokeGITViewer_${V}_x64-portable.exe"
-          cp "$src" "$out"
-          gh release upload "${GITHUB_REF_NAME}" "$out" --clobber

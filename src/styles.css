@@ -133,7 +133,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 #open-btn,
-#clone-btn {
+#clone-btn,
+#init-btn {
   display: flex;
   align-items: center;
   gap: 6px;
