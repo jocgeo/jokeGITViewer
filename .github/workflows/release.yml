@@ -11,7 +11,44 @@ permissions:
   contents: write # needed to create the release and upload assets
 
 jobs:
+  # Fails in seconds with a readable message instead of after a 15-minute
+  # matrix build, and says exactly which token setting is wrong.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check RELEASES_TOKEN can publish to the downloads repo
+        env:
+          TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          set -uo pipefail
+          target="jocgeo/jokeGitViewer-Releases"
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::secret RELEASES_TOKEN is empty or not set on this repo"
+            exit 1
+          fi
+          # -o writes the body, -w prints just the status: no escapes needed
+          code=$(curl -s -o body.json -w "%{http_code}" -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$target")
+          echo "GET /repos/$target -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::Token cannot see $target (HTTP $code). Fine-grained token: Repository access must be 'Only select repositories' -> $target, and Resource owner must be jocgeo."
+            exit 1
+          fi
+          # A fine-grained token's real rights are NOT visible in
+          # .permissions (that mirrors the ACCOUNT's access), so probe the
+          # actual operation: create a draft release, then delete it again.
+          probe=$(curl -s -o probe.json -w "%{http_code}" -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$target/releases" -d '{"tag_name":"ci-permission-probe","draft":true,"name":"permission probe"}')
+          echo "POST /releases -> HTTP $probe"
+          if [ "$probe" != "201" ]; then
+            echo "::error::Token cannot create releases in $target (HTTP $probe). Fine-grained token needs Repository permissions -> Contents: Read and write on that repo. $(jq -r '.message // empty' probe.json)"
+            exit 1
+          fi
+          id=$(jq -r ".id" probe.json)
+          curl -s -X DELETE -H "Authorization: Bearer $TOKEN" "https://api.github.com/repos/$target/releases/$id" >/dev/null
+          echo "probe release $id created and removed again"
+          echo "Token OK: can create releases in $target"
+
   build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
