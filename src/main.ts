@@ -102,6 +102,54 @@ function langForFile(file: string): string | null {
   return HL_EXT[ext] ?? null;
 }
 
+// Highlight a whole block at once and hand back per-line HTML.
+// Highlighting line-by-line breaks anything that spans lines (block comments,
+// multi-line strings): the continuation lines have no idea they are inside it.
+// So we highlight the joined text, then split the result on newlines, closing
+// every still-open span at the end of a line and reopening it on the next.
+function hlLines(lines: string[], lang: string | null): string[] {
+  if (!lang) return lines.map(escapeHtml);
+  let html: string;
+  try {
+    html = hljs.highlight(lines.join("\n"), {
+      language: lang,
+      ignoreIllegals: true,
+    }).value;
+  } catch {
+    return lines.map(escapeHtml);
+  }
+  const out: string[] = [];
+  const open: string[] = []; // stack of currently open <span ...> tags
+  let cur = "";
+  let i = 0;
+  while (i < html.length) {
+    const ch = html[i];
+    if (ch === "<") {
+      const end = html.indexOf(">", i);
+      if (end === -1) {
+        cur += html.slice(i);
+        break;
+      }
+      const tag = html.slice(i, end + 1);
+      if (tag.startsWith("</")) open.pop();
+      else open.push(tag);
+      cur += tag;
+      i = end + 1;
+    } else if (ch === "\n") {
+      out.push(cur + "</span>".repeat(open.length)); // close for this line
+      cur = open.join(""); // ...and reopen on the next
+      i++;
+    } else {
+      cur += ch;
+      i++;
+    }
+  }
+  out.push(cur);
+  // hljs never drops or adds lines, but stay defensive about the mapping
+  while (out.length < lines.length) out.push("");
+  return out.slice(0, lines.length);
+}
+
 // highlight ONE line of code (stateless per line — good enough for diffs);
 // falls back to plain escaping for unknown languages or hljs errors
 function hlLine(text: string, lang: string | null): string {
@@ -2436,6 +2484,11 @@ async function showBlame() {
     return;
   }
   const body = $("diffview-body");
+  // highlight the file as ONE document so block comments/strings stay intact
+  const blameHl = hlLines(
+    lines.map((bl) => bl.content),
+    langForFile(file)
+  );
   body.innerHTML = lines
     .map((bl, i) => {
       const newGroup = i === 0 || lines[i - 1].hash !== bl.hash;
@@ -2449,7 +2502,7 @@ async function showBlame() {
         `<span class="bl-ind"></span>` +
         `<span class="bl-meta">${escapeHtml(meta)}</span>` +
         `<span class="ln">${i + 1}</span>` +
-        `<span class="dc">${hlLine(bl.content, langForFile(file))}</span></div>`
+        `<span class="dc">${blameHl[i]}</span></div>`
       );
     })
     .join("");
@@ -2652,6 +2705,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     saveSession();
     saveRepoCache(path, repo);
     refreshRemoteTags(tab);
+    void initialFetch(path); // the graph is already up; refresh it in the background
   } catch (e) {
     setStatus("");
     if (silent) console.warn("skip repo", path, String(e));
@@ -3370,12 +3424,13 @@ async function renderPlainView() {
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
     // line numbers via CSS counter (::before) — selecting + copying grabs
     // ONLY the code, never the numbers
+    const hl = hlLines(lines, lang); // one pass, so multi-line comments work
     body.innerHTML =
       `<div class="plainview">` +
       lines
         .map(
-          (l, i) =>
-            `<div class="pl" data-ln="${i + 1}"><span class="plc">${hlLine(l, lang) || "&nbsp;"}</span></div>`
+          (_l, i) =>
+            `<div class="pl" data-ln="${i + 1}"><span class="plc">${hl[i] || "&nbsp;"}</span></div>`
         )
         .join("") +
       `</div>`;
@@ -4782,6 +4837,27 @@ async function reloadGraphOnly() {
   }
 }
 
+// One fetch right after a repo is opened, so the graph reflects origin instead
+// of whatever the last clone/fetch left behind. Deliberately AFTER the tab is
+// rendered: the repo shows instantly and this fills in remote state when it
+// lands. Silent on failure (no remote, offline, auth prompt).
+async function initialFetch(path: string) {
+  const still = () => cur()?.repo.path === path;
+  if (!still()) return;
+  setStatus("fetching origin…");
+  try {
+    await invoke("fetch", { path });
+  } catch {
+    if (still()) setStatus(""); // no remote / offline — nothing to report
+    return;
+  }
+  if (!still()) return; // user switched tabs meanwhile
+  const t = cur()!;
+  await reloadGraphOnly();
+  refreshRemoteTags(t);
+  setStatus("Fetched origin");
+}
+
 // quietly fetch in the background so pushes from elsewhere show up; the
 // fingerprint poll then detects the updated remote refs and reloads.
 let autoFetching = false;
@@ -5214,11 +5290,63 @@ async function doPush() {
     await reloadActive(msg);
   } catch (e) {
     setStatus("");
+    const m = /BEHIND:(.+)$/.exec(String(e));
+    if (m) {
+      // git cannot tell "someone else pushed" apart from "I rewrote history"
+      // (both are ahead=0, behind>0), so let the user say which one it is.
+      const br = m[1].trim();
+      const pick = await choiceModal(
+        `Push rejected — origin/${br} has commits you don't have`,
+        `Keep them:  pull origin's commits into your branch, then push.` +
+          `\n\n` +
+          `Discard them:  force-push, replacing origin/${br} with your version. ` +
+          `Choose this after a hard reset, rebase or amend — anything on origin ` +
+          `that you don't have is lost for everyone.`,
+        [
+          { key: "pull", label: "Pull (keep origin)" },
+          { key: "force", label: "Force push (overwrite origin)", danger: true },
+        ]
+      );
+      if (pick === "pull") {
+        await doPull();
+        setStatus("Pulled — press Push again");
+      } else if (pick === "force") {
+        await doForcePush();
+      }
+      return;
+    }
     errorModal("Push failed:\n" + String(e));
   } finally {
     popBusy();
   }
 }
+// Force-push with --force-with-lease. Refuses if origin moved since our last
+// fetch, so a rewrite can't quietly bury someone else's work.
+async function doForcePush() {
+  const t = cur();
+  if (!t) return;
+  setStatus("force-pushing…");
+  pushBusy("push-btn");
+  try {
+    const msg = await invoke<string>("force_push", { path: t.repo.path });
+    await reloadActive(msg);
+  } catch (e) {
+    setStatus("");
+    if (/STALE:/.test(String(e))) {
+      errorModal(
+        "Force-push refused: origin has changed since your last fetch." +
+          "\n\n" +
+          "Someone pushed in the meantime, so overwriting now would destroy " +
+          "their work. Fetch, look at what arrived, then decide."
+      );
+    } else {
+      errorModal("Force-push failed:\n" + String(e));
+    }
+  } finally {
+    popBusy();
+  }
+}
+
 async function doBranch() {
   const t = cur();
   if (!t) return;
@@ -5420,6 +5548,43 @@ function errorModal(msg: string) {
   });
 }
 
+// Modal with several named choices (returns the picked key, or null).
+// Used where "yes/no" would hide a real decision from the user.
+function choiceModal(
+  title: string,
+  body: string,
+  choices: { key: string; label: string; danger?: boolean }[]
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      `<div class="modal choice-modal"><div class="modal-title">${escapeHtml(title)}</div>` +
+      `<div class="modal-body">${escapeHtml(body)}</div>` +
+      `<div class="modal-btns"><button class="modal-cancel">Cancel</button>` +
+      choices
+        .map(
+          (c) =>
+            `<button class="modal-ok${c.danger ? " danger" : ""}" data-key="${escapeHtml(c.key)}">` +
+            `${escapeHtml(c.label)}</button>`
+        )
+        .join("") +
+      `</div></div>`;
+    document.body.appendChild(overlay);
+    const done = (v: string | null) => {
+      overlay.remove();
+      resolve(v);
+    };
+    overlay.querySelectorAll<HTMLElement>(".modal-ok").forEach((b) =>
+      b.addEventListener("click", () => done(b.dataset.key ?? null))
+    );
+    overlay.querySelector(".modal-cancel")?.addEventListener("click", () => done(null));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) done(null);
+    });
+  });
+}
+
 function confirmModal(title: string): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
@@ -5439,6 +5604,50 @@ function confirmModal(title: string): Promise<boolean> {
       if (e.target === overlay) done(false);
     });
   });
+}
+
+// Delete a local branch. Safe delete first; if git refuses because the branch
+// still holds unmerged work, say how many commits would be lost before
+// offering the forced delete.
+async function doDeleteBranch(path: string, r: RefInfo) {
+  if (r.is_head) {
+    errorModal(
+      `"${r.name}" is the branch you have checked out.\n\n` +
+        `Switch to another branch first, then delete it.`
+    );
+    return;
+  }
+  if (!(await confirmModal(`Delete local branch "${r.name}"?`))) return;
+  try {
+    await invoke("delete_branch", { path, name: r.name, force: false });
+    await reloadActive(`Deleted branch ${r.name}`);
+    return;
+  } catch (e) {
+    if (!/NOT_MERGED:/.test(String(e))) {
+      errorModal("Delete failed:\n" + String(e));
+      return;
+    }
+  }
+  // unmerged: make the cost explicit before offering the forced delete
+  let n = 0;
+  try {
+    n = await invoke<number>("branch_unmerged_count", { path, name: r.name });
+  } catch {}
+  const lost = n === 1 ? "1 commit" : `${n} commits`;
+  const ok = await confirmModal(
+    `"${r.name}" is not fully merged.\n\n` +
+      (n > 0
+        ? `${lost} exist only on this branch and would be lost.\n\n`
+        : `It holds work that is in no other branch.\n\n`) +
+      `Force-delete anyway?`
+  );
+  if (!ok) return;
+  try {
+    await invoke("delete_branch", { path, name: r.name, force: true });
+    await reloadActive(`Force-deleted branch ${r.name}`);
+  } catch (e2) {
+    errorModal("Delete failed:\n" + String(e2));
+  }
 }
 
 async function doCreateBranch(path: string, start: string) {
@@ -5640,6 +5849,13 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
         action: () => doHardReset(path, r.target, curBranch, r.name),
       });
     }
+  }
+  if (r.kind === "local") {
+    items.push({ separator: true });
+    items.push({
+      label: `Delete branch ${r.name}`,
+      action: () => doDeleteBranch(path, r),
+    });
   }
   items.push({ separator: true });
   items.push({ label: "Create branch here…", action: () => doCreateBranch(path, hash) });
@@ -5846,7 +6062,9 @@ function markRange(html: string, start: number, end: number, cls: string): strin
 function intraline(
   oldS: string,
   newS: string,
-  lang: string | null = null
+  lang: string | null = null,
+  oHtml?: string, // pre-highlighted (block-aware) HTML when the caller has it
+  nHtml?: string
 ): { o: string; n: string } {
   const min = Math.min(oldS.length, newS.length);
   let p = 0;
@@ -5858,8 +6076,8 @@ function intraline(
   )
     s++;
   return {
-    o: markRange(hlLine(oldS, lang), p, oldS.length - s, "chg"),
-    n: markRange(hlLine(newS, lang), p, newS.length - s, "chg"),
+    o: markRange(oHtml ?? hlLine(oldS, lang), p, oldS.length - s, "chg"),
+    n: markRange(nHtml ?? hlLine(newS, lang), p, newS.length - s, "chg"),
   };
 }
 
@@ -5868,6 +6086,30 @@ function intraline(
 function renderUnifiedDiff(diff: string): string {
   const lines = diff.split("\n");
   const lang = hlLang; // set by the view that opened the diff
+  // Pre-pass: rebuild each SIDE of the diff as its own document and
+  // highlight it in one go. Per-row highlighting breaks block comments and
+  // multi-line strings — continuation lines get coloured as plain code.
+  const oldTexts: string[] = [];
+  const newTexts: string[] = [];
+  const isMetaLine = (l: string) =>
+    l.startsWith("diff ") || l.startsWith("index ") || l.startsWith("+++") ||
+    l.startsWith("---") || l.startsWith("new file") ||
+    l.startsWith("deleted file") || l.startsWith("old mode") ||
+    l.startsWith("new mode") || l.startsWith("similarity") ||
+    l.startsWith("rename ") || l.startsWith("\\");
+  for (const l of lines) {
+    if (l === "" || l.startsWith("@@") || isMetaLine(l)) continue;
+    if (l.startsWith("+")) newTexts.push(l.slice(1));
+    else if (l.startsWith("-")) oldTexts.push(l.slice(1));
+    else {
+      oldTexts.push(l.slice(1));
+      newTexts.push(l.slice(1));
+    }
+  }
+  const oldHl = hlLines(oldTexts, lang);
+  const newHl = hlLines(newTexts, lang);
+  let oi = 0; // cursor into oldHl
+  let ni = 0; // cursor into newHl
   let oldN = 0;
   let newN = 0;
   const rows: string[] = [];
@@ -5885,8 +6127,8 @@ function renderUnifiedDiff(diff: string): string {
   // buffered consecutive removals/additions, flushed as a paired block.
   // Paired lines keep the character-level change highlight (no syntax there);
   // everything else gets syntax highlighting.
-  let dels: { text: string; ln: number }[] = [];
-  let adds: { text: string; ln: number }[] = [];
+  let dels: { text: string; ln: number; html: string }[] = [];
+  let adds: { text: string; ln: number; html: string }[] = [];
   const flush = () => {
     const pair = Math.min(dels.length, adds.length);
     dels.forEach((d, i) =>
@@ -5895,7 +6137,9 @@ function renderUnifiedDiff(diff: string): string {
           "del",
           String(d.ln),
           "",
-          i < pair ? intraline(d.text, adds[i].text, lang).o : hlLine(d.text, lang)
+          i < pair
+            ? intraline(d.text, adds[i].text, lang, d.html, adds[i].html).o
+            : d.html
         )
       )
     );
@@ -5905,7 +6149,9 @@ function renderUnifiedDiff(diff: string): string {
           "add",
           "",
           String(a.ln),
-          i < pair ? intraline(dels[i].text, a.text, lang).n : hlLine(a.text, lang)
+          i < pair
+            ? intraline(dels[i].text, a.text, lang, dels[i].html, a.html).n
+            : a.html
         )
       )
     );
@@ -5939,12 +6185,14 @@ function renderUnifiedDiff(diff: string): string {
       flush();
       rows.push(row("meta", "", "", escapeHtml(line)));
     } else if (line.startsWith("+")) {
-      adds.push({ text: line.slice(1), ln: newN++ });
+      adds.push({ text: line.slice(1), ln: newN++, html: newHl[ni++] ?? "" });
     } else if (line.startsWith("-")) {
-      dels.push({ text: line.slice(1), ln: oldN++ });
+      dels.push({ text: line.slice(1), ln: oldN++, html: oldHl[oi++] ?? "" });
     } else {
       flush();
-      rows.push(row("ctx", String(oldN++), String(newN++), hlLine(line.slice(1), lang)));
+      const ctxHtml = newHl[ni++] ?? ""; // context exists on both sides
+      oi++;
+      rows.push(row("ctx", String(oldN++), String(newN++), ctxHtml));
     }
   }
   flush();

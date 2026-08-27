@@ -1497,8 +1497,53 @@ async fn push(path: String) -> Result<String, String> {
     if branch.is_empty() {
         return Err("cannot push: detached HEAD".to_string());
     }
-    git(&path, &["push", "-u", "origin", branch])?;
-    Ok(format!("Pushed {branch} to origin"))
+    // --porcelain puts a machine-readable status on STDOUT ("[up to date]",
+    // "[rejected] (fetch first)", "old..new"), so we can tell "nothing to do"
+    // apart from a real failure instead of surfacing git's prose + hints.
+    match git(&path, &["push", "--porcelain", "-u", "origin", branch]) {
+        Ok(out) => {
+            if out.contains("[up to date]") {
+                Ok(format!("Nothing to push — {branch} matches origin"))
+            } else {
+                Ok(format!("Pushed {branch} to origin"))
+            }
+        }
+        Err(e) => {
+            // rejected: origin moved on. Pulling is the fix, not a scary dump.
+            if e.contains("[rejected]") || e.contains("fetch first") {
+                Err(format!("BEHIND:{branch}"))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+// Force-push the current branch with --force-with-lease: overwrites the remote
+// branch, but ONLY if it still points where our last fetch saw it. So a
+// deliberate rewrite (hard reset, rebase, amend) goes through, while a
+// teammate's newer push is never silently destroyed.
+#[tauri::command]
+async fn force_push(path: String) -> Result<String, String> {
+    let branch = git(&path, &["symbolic-ref", "--short", "HEAD"])
+        .map_err(|_| "cannot push: detached HEAD".to_string())?;
+    let branch = branch.trim().to_string();
+    if branch.is_empty() {
+        return Err("cannot push: detached HEAD".to_string());
+    }
+    match git(
+        &path,
+        &["push", "--porcelain", "--force-with-lease", "-u", "origin", &branch],
+    ) {
+        Ok(_) => Ok(format!("Force-pushed {branch} to origin")),
+        Err(e) => {
+            if e.contains("stale info") || e.contains("[rejected]") {
+                Err(format!("STALE:{branch}"))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1749,6 +1794,49 @@ async fn remote_tags(path: String) -> Result<Vec<String>, String> {
 async fn push_tag(path: String, name: String) -> Result<String, String> {
     git(&path, &["push", "origin", &name])?;
     Ok(format!("Pushed tag {name}"))
+}
+
+// Delete a local branch. Plain `-d` refuses when the branch still holds
+// commits that are in no other branch; the UI then offers the forced `-D`
+// after spelling out what would be lost.
+#[tauri::command]
+async fn delete_branch(path: String, name: String, force: Option<bool>) -> Result<(), String> {
+    let flag = if force.unwrap_or(false) { "-D" } else { "-d" };
+    match git(&path, &["branch", flag, &name]) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let low = e.to_lowercase();
+            if low.contains("not fully merged") {
+                Err(format!("NOT_MERGED:{name}"))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+// How many commits would be lost: reachable from this branch but from no other
+// branch (local or remote). Shown in the force-delete confirmation.
+#[tauri::command]
+async fn branch_unmerged_count(path: String, name: String) -> Result<u32, String> {
+    let raw = git(
+        &path,
+        &[
+            "rev-list",
+            "--count",
+            &name,
+            "--not",
+            // --exclude only affects the NEXT --branches/--remotes, so it has
+            // to come first; otherwise the branch excludes itself and the
+            // answer is always 0.
+            &format!("--exclude={name}"),
+            "--branches",
+            "--remotes",
+        ],
+    )
+    .or_else(|_| git(&path, &["rev-list", "--count", &name, "--not", "--remotes"]))
+    .unwrap_or_default();
+    Ok(raw.trim().parse().unwrap_or(0))
 }
 
 #[tauri::command]
@@ -2073,6 +2161,7 @@ pub fn run() {
             worktree_add,
             diff_commit_worktree,
             push,
+            force_push,
             pull,
             stash_push,
             stash_pop,
@@ -2088,6 +2177,8 @@ pub fn run() {
             merge_continue,
             remote_tags,
             push_tag,
+            delete_branch,
+            branch_unmerged_count,
             delete_tag,
             delete_remote_tag,
             blob_data_url,
