@@ -232,6 +232,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   white-space: nowrap;
 }
 .ctxitem:hover { background: var(--accent); color: #0a0a12; }
+/* unavailable action: kept visible so the reason is discoverable, but inert */
+.ctxitem.disabled { color: var(--muted); cursor: default; }
+.ctxitem.disabled:hover { background: none; color: var(--muted); }
 .ctxsep { height: 1px; background: var(--border); margin: 4px 0; }
 
 /* modal (prompt / confirm) */
@@ -252,7 +255,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   min-width: 320px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
-.modal-title { font-weight: 600; margin-bottom: 12px; }
+/* pre-wrap so multi-line confirm/prompt text keeps its line breaks */
+.modal-title { font-weight: 600; margin-bottom: 12px; white-space: pre-wrap; }
 .modal-input {
   width: 100%;
   background: var(--bg);

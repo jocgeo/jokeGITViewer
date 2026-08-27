@@ -1538,6 +1538,38 @@ async fn create_branch(path: String, name: String, start: String) -> Result<(), 
     Ok(())
 }
 
+// Deleting local and remote branches are deliberately two separate commands:
+// removing a local branch is cheap and reversible while the commits are still
+// reachable, deleting on the remote affects everyone and is not.
+
+/// Delete a local branch. Returns "deleted", or "unmerged" when git refused
+/// because the branch holds commits that aren't merged anywhere else — the
+/// caller can confirm with the user and retry with `force`.
+/// A String (not a bool) so the result can't be mistaken for the
+/// "stashed" flag other mutating commands return.
+#[tauri::command]
+async fn delete_branch(path: String, name: String, force: bool) -> Result<String, String> {
+    let flag = if force { "-D" } else { "-d" };
+    match git(&path, &["branch", flag, &name]) {
+        Ok(_) => Ok("deleted".to_string()),
+        // git's wording, stable since 1.5: "error: the branch 'x' is not fully merged"
+        Err(e) if !force && e.contains("not fully merged") => Ok("unmerged".to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Delete a branch on a remote. Also drops the local remote-tracking ref,
+/// which `git push --delete` does for us.
+#[tauri::command]
+async fn delete_remote_branch(path: String, remote: String, name: String) -> Result<(), String> {
+    // fully-qualified refspec so a tag of the same name can never be hit
+    git(
+        &path,
+        &["push", &remote, "--delete", &format!("refs/heads/{name}")],
+    )
+    .map(|_| ())
+}
+
 #[tauri::command]
 async fn create_tag(path: String, name: String, hash: String) -> Result<(), String> {
     git(&path, &["tag", &name, &hash]).map(|_| ())
@@ -1899,6 +1931,8 @@ pub fn run() {
             push_tag,
             delete_tag,
             delete_remote_tag,
+            delete_branch,
+            delete_remote_branch,
             blob_data_url,
             compare_files,
             diff_against_working,

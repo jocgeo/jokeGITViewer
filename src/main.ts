@@ -4566,6 +4566,8 @@ interface MenuItem {
   label?: string;
   action?: () => void;
   separator?: boolean;
+  disabled?: boolean; // shown greyed out, explains why an action isn't available
+  title?: string; // hover tooltip (e.g. the exact git command)
 }
 function showMenu(x: number, y: number, items: MenuItem[]) {
   closeMenu();
@@ -4580,12 +4582,15 @@ function showMenu(x: number, y: number, items: MenuItem[]) {
       return;
     }
     const row = document.createElement("div");
-    row.className = "ctxitem";
+    row.className = "ctxitem" + (it.disabled ? " disabled" : "");
     row.textContent = it.label ?? "";
-    row.addEventListener("click", () => {
-      closeMenu();
-      it.action?.();
-    });
+    if (it.title) row.title = it.title;
+    if (!it.disabled) {
+      row.addEventListener("click", () => {
+        closeMenu();
+        it.action?.();
+      });
+    }
     menu.appendChild(row);
   });
   document.body.appendChild(menu);
@@ -4764,6 +4769,53 @@ async function doCreateTag(path: string, hash: string, annotated: boolean) {
     runAction(invoke("create_tag", { path, name, hash }), `Created tag ${name}`);
   }
 }
+// Delete a local branch. `git branch -d` refuses when the branch isn't merged
+// anywhere, so that case comes back as "unmerged" and we ask a second time
+// before discarding the commits with -D.
+async function doDeleteLocalBranch(path: string, name: string) {
+  if (!(await confirmModal(`Delete local branch ${name}?`))) return;
+
+  pushBusy();
+  let unmerged = false;
+  try {
+    unmerged =
+      (await invoke<string>("delete_branch", { path, name, force: false })) === "unmerged";
+    if (!unmerged) await reloadActive(`Deleted branch ${name}`);
+  } catch (e) {
+    setStatus("");
+    errorModal(`Delete branch ${name} failed:\n${String(e)}`);
+    return;
+  } finally {
+    popBusy();
+  }
+  if (!unmerged) return;
+
+  // second confirm: -D throws away commits that live nowhere else
+  const forced = await confirmModal(
+    `Branch ${name} is not fully merged. Deleting it discards the commits ` +
+      `that only exist on this branch. Delete anyway?`
+  );
+  if (forced)
+    runAction(
+      invoke("delete_branch", { path, name, force: true }),
+      `Deleted branch ${name}`
+    );
+}
+
+// Delete a branch on the remote — separate from the local delete, and far less
+// reversible, so the confirm spells out that it hits everyone.
+async function doDeleteRemoteBranch(path: string, remote: string, name: string) {
+  const ok = await confirmModal(
+    `Delete branch ${name} on ${remote}? This removes it for everyone who ` +
+      `uses this remote and cannot be undone from here.`
+  );
+  if (ok)
+    runAction(
+      invoke("delete_remote_branch", { path, remote, name }),
+      `Deleted ${name} on ${remote}`
+    );
+}
+
 async function doWorktree(path: string, hash: string) {
   const dir = await open({ directory: true, title: "Pick an empty folder for the worktree" });
   if (!dir || Array.isArray(dir)) return;
@@ -4951,6 +5003,46 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
   items.push({ separator: true });
   items.push({ label: "Create tag here…", action: () => doCreateTag(path, hash, false) });
   items.push({ label: "Create annotated tag here…", action: () => doCreateTag(path, hash, true) });
+
+  // Delete: local and remote are always two separate actions, and both appear
+  // whichever side was right-clicked, so the pair is predictable. The clicked
+  // ref itself always wins, so right-clicking upstream/foo can never offer to
+  // delete origin/foo when both remotes carry the same branch name.
+  const localRef = isRemote
+    ? repo.refs.find((x) => x.kind === "local" && x.name === target)
+    : r;
+  const remoteRef = isRemote
+    ? r
+    : repo.refs.find(
+        (x) => x.kind === "remote" && x.name.split("/").slice(1).join("/") === target
+      );
+  if (localRef || remoteRef) {
+    items.push({ separator: true });
+    if (localRef) {
+      if (localRef.name === curBranch) {
+        items.push({
+          label: `Delete local branch ${target} — checked out`,
+          disabled: true,
+          title: "Check out another branch first",
+        });
+      } else {
+        items.push({
+          label: `Delete local branch ${target}`,
+          title: `git branch -d ${target}`,
+          action: () => doDeleteLocalBranch(path, target),
+        });
+      }
+    }
+    if (remoteRef) {
+      const remote = remoteRef.name.split("/")[0];
+      items.push({
+        label: `Delete remote branch ${remoteRef.name}`,
+        title: `git push ${remote} --delete refs/heads/${target}`,
+        action: () => doDeleteRemoteBranch(path, remote, target),
+      });
+    }
+  }
+
   items.push({ separator: true });
   items.push({ label: "Copy branch name", action: () => copyText(r.name) });
   items.push({ label: "Copy commit SHA", action: () => copyText(hash) });
