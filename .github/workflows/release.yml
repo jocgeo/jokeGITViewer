@@ -142,6 +142,10 @@ jobs:
           owner: jocgeo
           repo: jokeGitViewer-Releases
           tagName: ${{ github.ref_name }}
+          # The tag does not exist in the downloads repo, so GitHub creates it
+          # there. Default would be this repo's commit SHA, which is unknown
+          # over there -> "invalid target_commitish". Anchor it to their main.
+          releaseCommitish: main
           releaseName: "jokeGITViewer ${{ github.ref_name }}"
           releaseBody: ${{ steps.changelog.outputs.body }}
           releaseDraft: false
