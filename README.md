@@ -110,7 +110,7 @@ bundled libgit2, no heavy runtime. Small binary, native window.
 ## Install
 
 Grab an installer or the portable build from the
-[latest release](https://github.com/jocgeo/jokeGITViewer/releases/latest):
+[latest release](https://github.com/jocgeo/jokeGitViewer-Releases/releases/latest):
 
 - Windows: `.msi` / NSIS setup `.exe`, or the **portable** `…_x64-portable.exe` (no install)
 - Linux: `.deb` / `.AppImage`

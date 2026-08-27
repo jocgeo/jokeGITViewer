@@ -758,8 +758,8 @@ function showAbout() {
     `<div>License: MIT © jocgeo</div>` +
     `</div>` +
     `<div class="about-links">` +
-    `<button data-url="https://github.com/jocgeo/jokeGITViewer">GitHub</button>` +
-    `<button data-url="https://github.com/jocgeo/jokeGITViewer/releases">Releases</button>` +
+    `<button data-url="https://github.com/jocgeo/jokeGitViewer-Releases">GitHub</button>` +
+    `<button data-url="https://github.com/jocgeo/jokeGitViewer-Releases/releases">Releases</button>` +
     `</div>` +
     `<div class="modal-btns"><button class="modal-ok">Close</button></div>` +
     `</div>`;
@@ -853,13 +853,13 @@ async function checkForUpdate() {
 async function checkUpdateManual() {
   try {
     const res = await fetch(
-      "https://api.github.com/repos/jocgeo/jokeGITViewer/releases/latest",
+      "https://api.github.com/repos/jocgeo/jokeGitViewer-Releases/releases/latest",
       { headers: { Accept: "application/vnd.github+json" } }
     );
     if (!res.ok) return;
     const data = await res.json();
     const tag = String(data.tag_name ?? "").replace(/^v/, "");
-    const url = String(data.html_url ?? "https://github.com/jocgeo/jokeGITViewer/releases");
+    const url = String(data.html_url ?? "https://github.com/jocgeo/jokeGitViewer-Releases/releases");
     if (!tag || !appVersion || !isNewerVersion(tag, appVersion)) return;
     const b = $("update-banner");
     b.innerHTML =
