@@ -113,3 +113,42 @@ jobs:
           # attaches the raw exe too — replaces the manual upload step
           uploadPlainBinary: true
           args: ${{ matrix.args }}
+
+  # Transition shim: installations released before the move still ask the OLD
+  # repo for updates. Mirroring just latest.json there lets them find the new
+  # release — its URLs already point at the downloads repo, so they fetch the
+  # binaries from there and come back with the new endpoint baked in.
+  #
+  # Turn this off once nobody runs a pre-move build: set the repository
+  # variable STOP_LEGACY_MIRROR to "true" (Settings -> Secrets and variables
+  # -> Actions -> Variables). No code change needed.
+  mirror-updater-json:
+    needs: build
+    if: vars.STOP_LEGACY_MIRROR != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror latest.json into the old repo
+        env:
+          # the built-in token is scoped to THIS repo, which is the one we
+          # publish the shim release into
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # the downloads repo is public, so no auth needed to read it back
+          url="https://github.com/jocgeo/jokeGitViewer-Releases/releases/download/$TAG/latest.json"
+          for i in 1 2 3 4 5; do
+            curl -sfL -o latest.json "$url" && break
+            echo "latest.json not published yet, retry $i"; sleep 10
+          done
+          test -s latest.json
+          echo "mirroring:"; cat latest.json
+
+          notes="Downloads have moved to [jokeGitViewer-Releases](https://github.com/jocgeo/jokeGitViewer-Releases/releases/latest).
+
+          This release only carries \`latest.json\` so older installations can find the update. Get the installers from the link above."
+
+          gh release create "$TAG" -R jocgeo/jokeGITViewer \
+              --title "jokeGITViewer $TAG (downloads moved)" \
+              --notes "$notes" latest.json \
+            || gh release upload "$TAG" -R jocgeo/jokeGITViewer latest.json --clobber
