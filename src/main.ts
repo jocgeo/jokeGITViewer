@@ -256,7 +256,9 @@ const PAD = 14;
 // (see graphPanX), leaving the commit messages exactly where they are.
 const LANE_W = 20;
 const NODE_R = 5;
-const GRAPH_VIEW_MAX = 340; // widest the graph column gets before it scrolls
+const GRAPH_VIEW_MAX = 200; // widest the graph column gets before it scrolls
+const BRANCH_W = 170; // branch column, leftmost
+const TAG_W = 110; // tag column, right of the branches
 
 let graphPanX = 0; // horizontal scroll offset inside the graph column
 const WIP_ID = "__WIP__";
@@ -599,6 +601,7 @@ function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
 }
 
 const TIP_SZ = 15; // badge drawn on a branch/tag tip
+const TAG_COLOR = "#f0e2be"; // cream — tags are not branches
 
 // which glyph marks this commit as a tip: a local branch wins over a
 // remote-only one, tags only when no branch points here. null = plain dot.
@@ -1250,40 +1253,114 @@ async function refreshRemoteTags(t: Tab) {
 
 // branches: primary (current if present, else first) + "+N" pill.
 // tags: always shown as their own badges so they're easy to spot.
-function buildRefColumn(refsHere: RefInfo[], laneColor?: string): string {
+// Branches and tags get separate columns: crammed together, a tag next to a
+// long branch name was the first thing to be clipped away.
+function buildRefColumn(
+  refsHere: RefInfo[],
+  laneColor?: string
+): { branches: string; tags: string } {
   const units = refUnits(refsHere);
-  if (!units.length) return "";
-  const branches = units.filter((u) => !u.tag);
-  const tags = units.filter((u) => u.tag);
+  if (!units.length) return { branches: "", tags: "" };
+  const branchUnits = units.filter((u) => !u.tag);
+  const tagUnits = units.filter((u) => u.tag);
 
-  let html = "";
-  if (branches.length) {
-    let pi = branches.findIndex((u) => u.isHead);
+  let branches = "";
+  if (branchUnits.length) {
+    let pi = branchUnits.findIndex((u) => u.isHead);
     if (pi < 0) pi = 0;
-    html += unitBadge(branches[pi], laneColor);
-    const others = branches.filter((_, i) => i !== pi);
+    branches += unitBadge(branchUnits[pi], laneColor);
+    const others = branchUnits.filter((_, i) => i !== pi);
     if (others.length) {
       const title = others.map((u) => u.name).join("\n");
-      html += `<span class="refplus" title="${escapeHtml(title)}">+${others.length}</span>`;
+      branches += `<span class="refplus" title="${escapeHtml(title)}">+${others.length}</span>`;
     }
   }
-  // all tags, always visible (rendered last = nearest the graph)
-  html += tags.map((u) => unitBadge(u, laneColor)).join("");
-  return html;
+  const tags = tagUnits.map((u) => unitBadge(u, laneColor)).join("");
+  return { branches, tags };
+}
+
+// x where the graph column starts, taken from the rendered header so hidden
+// or resized columns are accounted for automatically
+function graphColumnLeft(): number {
+  const head = document.getElementById("col-headers");
+  const cell = document.querySelector(".ch-graph") as HTMLElement | null;
+  if (!head || !cell) return 0;
+  return Math.round(
+    cell.getBoundingClientRect().left - head.getBoundingClientRect().left
+  );
+}
+
+// ---- column widths (drag the grips in the header) ----
+// Stored per column; an unset column keeps its automatic width.
+const LS_COLW = "jkt.colw";
+function getColWidths(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(LS_COLW) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+function getColW(col: string, fallback: number): number {
+  const w = getColWidths()[col];
+  return typeof w === "number" && w > 0 ? w : fallback;
+}
+function setColW(col: string, w: number) {
+  const all = getColWidths();
+  all[col] = Math.round(w);
+  try {
+    localStorage.setItem(LS_COLW, JSON.stringify(all));
+  } catch {}
+}
+
+function setupColumnResize() {
+  document.querySelectorAll<HTMLElement>("#col-headers .colgrip").forEach((grip) => {
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const col = grip.dataset.col!;
+      const cell = grip.parentElement as HTMLElement;
+      const startX = e.clientX;
+      const startW = cell.getBoundingClientRect().width;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      const move = (ev: MouseEvent) => {
+        const w = Math.max(40, Math.min(900, startW + ev.clientX - startX));
+        setColW(col, w);
+        const pane = $("graphpane");
+        pane.style.setProperty(`--${col}-w`, `${w}px`);
+        // ANY column resize moves where the graph column starts, and the SVG
+        // is absolutely positioned, so it always has to be re-laid out.
+        const t = cur();
+        if (t) renderGraph(t);
+      };
+      const up = () => {
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+  });
 }
 
 // ---- column visibility (gear in the graph header) ----
 // Toggling only flips classes on #graphpane; CSS hides the pieces, so nothing
 // needs re-rendering and the change is instant even on huge repos.
 const COLUMNS: { key: string; label: string }[] = [
-  { key: "refs", label: "Branch / Tag" },
+  { key: "refs", label: "Branch" },
+  { key: "tags", label: "Tag" },
   { key: "graph", label: "Graph" },
   { key: "message", label: "Commit message" },
   { key: "author", label: "Author" },
   { key: "date", label: "Date / Time" },
   { key: "sha", label: "Sha" },
 ];
-const LS_COLUMNS = "jkt.columns";
+// v2: "tags" split out of "refs". A stored v1 list has no "tags" entry, and
+// a missing entry means "hidden" — so the new column would start invisible.
+// Bumping the key resets visibility once instead of guessing a migration.
+const LS_COLUMNS = "jkt.columns2";
 const DEFAULT_COLUMNS = COLUMNS.map((c) => c.key); // everything on by default
 
 function getColumns(): Set<string> {
@@ -1506,20 +1583,27 @@ function renderGraph(t: Tab) {
   }
 
   // Width: sizing to the deepest lane in the WHOLE repo leaves a big empty gap
-  // between the dots and the messages. Size to the 97th percentile instead —
-  // the rare deep lanes are still reachable via the sideways scroll.
+  // between the dots and the branch names. Size to the lane depth MOST rows
+  // actually use (85th percentile) so the names sit next to the graph; the
+  // rarer deep lanes stay reachable via the sideways scroll.
   const laneSorted = placed.map((p) => p.lane).sort((a, b) => a - b);
   const pct = laneSorted.length
-    ? laneSorted[Math.min(laneSorted.length - 1, Math.floor(laneSorted.length * 0.97))]
+    ? laneSorted[Math.min(laneSorted.length - 1, Math.floor(laneSorted.length * 0.85))]
     : 0;
   const shownLane = Math.max(2, Math.min(maxLane, pct + 1));
   const graphFullW = laneX(maxLane) + PAD;
-  const graphViewW = Math.min(
+  const graphAuto = Math.min(
     laneX(shownLane) + PAD,
     compactGraph ? 140 : GRAPH_VIEW_MAX
   );
+  const graphViewW = getColW("graph", graphAuto);
   const totalH = placed.length * ROW_H;
   graphPanX = Math.max(0, Math.min(graphPanX, graphFullW - graphViewW));
+
+  const pane = $("graphpane");
+  pane.style.setProperty("--branch-w", `${getColW("branch", BRANCH_W)}px`);
+  pane.style.setProperty("--tag-w", `${getColW("tag", TAG_W)}px`);
+  pane.style.setProperty("--graph-w", `${graphViewW}px`);
 
   const svg = $("graph-svg") as unknown as SVGSVGElement;
   svg.setAttribute("width", String(graphViewW));
@@ -1527,14 +1611,23 @@ function renderGraph(t: Tab) {
   // viewBox pans the lanes horizontally and clips them to the column — no
   // extra scroll container, so nothing can drift out of sync with the rows
   svg.setAttribute("viewBox", `${graphPanX} 0 ${graphViewW} ${totalH}`);
-  svg.style.left = "0px"; // graph is the leftmost column
+  // MEASURE where the graph column actually starts instead of adding up the
+  // configured widths: hidden columns (gear menu) render at 0 and a dragged
+  // width may not have been applied yet, both of which shifted the whole SVG
+  // out over the message column.
+  svg.style.left = `${graphColumnLeft()}px`;
   (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphViewW}px`;
   $("rows").style.height = `${totalH}px`;
 
   // min content width so the message column isn't cut off on narrow windows
   // (horizontal scroll kicks in instead of truncating)
   const MSG_MIN = 420;
-  const contentW = graphViewW + MSG_MIN;
+  const cols = getColumns();
+  const contentW =
+    graphViewW +
+    (cols.has("refs") ? getColW("branch", BRANCH_W) : 0) +
+    (cols.has("tags") ? getColW("tag", TAG_W) : 0) +
+    MSG_MIN;
   $("graph-content").style.minWidth = `${contentW}px`;
   $("col-headers").style.minWidth = `${contentW}px`;
 
@@ -1554,7 +1647,7 @@ function renderGraph(t: Tab) {
 // render only the rows/nodes/edges visible in the scroll viewport
 function paintViewport() {
   if (!gctx) return;
-  const { tab: t, placed, byId, refsByHash, graphViewW, headChain, forks, localReach } = gctx;
+  const { tab: t, placed, byId, refsByHash, headChain, forks, localReach } = gctx;
   const repo = t.repo;
 
   // lineage: highlight the whole branch line — ancestors AND descendants
@@ -1748,7 +1841,7 @@ function paintViewport() {
         parts.push(
           `<g${op}>` +
             `<rect x="${x - half}" y="${y - half}" width="${TIP_SZ}" height="${TIP_SZ}" rx="4" ` +
-            `fill="${p.color}" stroke="#141420" stroke-width="1.5"/>` +
+            `fill="${tip === "tag" ? TAG_COLOR : p.color}" stroke="#141420" stroke-width="1.5"/>` +
             `<g transform="translate(${x - half + gp} ${y - half + gp}) scale(${gs})" ` +
             `fill="none" stroke="#141420" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
             `${ICONS[tip] ?? ""}</g>${title}</g>`
@@ -1769,6 +1862,7 @@ function paintViewport() {
   // --- rows (only visible, absolutely positioned) ---
   const rows = $("rows");
   rows.innerHTML = "";
+  const nowSec = Math.floor(Date.now() / 1000);
   for (let i = start; i < end; i++) {
     const p = placed[i];
     const n = p.node;
@@ -1785,7 +1879,8 @@ function paintViewport() {
     if (n.id === t.selected) row.classList.add("selected");
     if (levelOf(n.id) === 0) row.classList.add("dim");
 
-    let refHtml = "";
+    let branchHtml = "";
+    let tagHtml = "";
     let msgHtml = "";
     if (n.kind === "wip") {
       const w = n.wip!;
@@ -1806,16 +1901,18 @@ function paintViewport() {
     } else {
       const c = n.commit!;
       const here = refsByHash.get(c.hash) ?? [];
-      refHtml =
+      const cols = buildRefColumn(here, p.color);
+      branchHtml =
         (c.hash === repo.head && !repo.head_branch
           ? `<span class="badge detached">HEAD · detached</span>`
-          : "") + buildRefColumn(here, p.color);
+          : "") + cols.branches;
+      tagHtml = cols.tags;
       if (
         t.hint &&
         t.hint.hash === c.hash &&
         !here.some((r) => r.name === t.hint!.branch)
       ) {
-        refHtml += `<span class="badge local ghost">${icon("local")}${escapeHtml(t.hint.branch)}</span>`;
+        branchHtml += `<span class="badge local ghost">${icon("local")}${escapeHtml(t.hint.branch)}</span>`;
       }
       msgHtml =
         `<span class="summary">${escapeHtml(c.summary)}</span>` +
@@ -1828,14 +1925,22 @@ function paintViewport() {
         `<span class="date">${fmtDate(c.time)}</span>` +
         `<span class="hash">${c.hash.slice(0, 8)}</span>`;
     }
-    // graph first (the eye lands on the structure), then the message with its
-    // ref pills inline — label sits directly against what it labels
+    // floating age marker whenever the bucket changes from the row above
+    const tsec = nodeTime(n);
+    if (tsec) {
+      const label = ageLabel(tsec, nowSec);
+      const prev = i > 0 ? placed[i - 1].node : null;
+      const prevT = prev ? nodeTime(prev) : 0;
+      if (!prevT || ageLabel(prevT, nowSec) !== label) {
+        msgHtml += `<span class="agomark">${escapeHtml(label)}</span>`;
+      }
+    }
+    // branches and tags in their own columns, then the graph, then the message
     row.innerHTML =
-      `<div class="col-graph" style="width:${graphViewW}px"></div>` +
-      `<div class="col-msg">` +
-      (refHtml ? `<span class="refs">${refHtml}</span>` : "") +
-      msgHtml +
-      `</div>`;
+      `<div class="col-branch">${branchHtml}</div>` +
+      `<div class="col-tag">${tagHtml}</div>` +
+      `<div class="col-graph"></div>` +
+      `<div class="col-msg">${msgHtml}</div>`;
     attachRowEvents(row, n, repo, refsByHash);
     rows.appendChild(row);
   }
@@ -1876,7 +1981,7 @@ function attachRowEvents(
   });
 
   // drag & drop on the graph's branch badges -> merge / rebase
-  row.querySelectorAll<HTMLElement>(".col-msg .badge[data-refname]").forEach((b) => {
+  row.querySelectorAll<HTMLElement>(".col-branch .badge[data-refname], .col-tag .badge[data-refname]").forEach((b) => {
     const name = b.dataset.refname!;
     const isLocal = b.dataset.refkind === "local";
     // double-click a branch/tag badge -> checkout
@@ -5911,6 +6016,36 @@ function escapeHtml(s: string): string {
 function cssEsc(s: string): string {
   return s.replace(/["\\]/g, "\\$&");
 }
+// Coarse age bucket for the floating "… ago" markers. The STRING doubles as
+// the bucket key: consecutive rows sharing a label only get one marker.
+function ageLabel(unix: number, nowSec: number): string {
+  const d = Math.max(0, nowSec - unix);
+  const H = 3600;
+  const DAY = 86400;
+  if (d < H) return "just now";
+  if (d < DAY) {
+    const h = Math.floor(d / H);
+    return h <= 1 ? "1 hour ago" : `${h} hours ago`;
+  }
+  const days = Math.floor(d / DAY);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  if (days < 30) {
+    const w = Math.floor(days / 7);
+    return w <= 1 ? "1 week ago" : `${w} weeks ago`;
+  }
+  if (days < 365) {
+    const m = Math.floor(days / 30);
+    return m <= 1 ? "1 month ago" : `${m} months ago`;
+  }
+  const y = Math.floor(days / 365);
+  return y <= 1 ? "1 year ago" : `${y} years ago`;
+}
+
+function nodeTime(n: GNode): number {
+  return n.kind === "commit" ? n.commit!.time : n.kind === "stash" ? n.stash!.time : 0;
+}
+
 function fmtDate(unix: number): string {
   const d = new Date(unix * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -6313,6 +6448,7 @@ window.addEventListener("DOMContentLoaded", () => {
     showColumnMenu(r.right - 4, r.bottom + 4);
   });
   setupGraphPan(); // graph column scrolls sideways on its own
+  setupColumnResize();
   linkHistScroll(); // list <-> graph proportional scroll in file-history split
   // clicking the sidebar or empty graph space resets the branch highlight
   $("sidebar").addEventListener("click", clearGraphHighlight);

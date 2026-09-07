@@ -583,7 +583,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* simple line icons */
 .ic { width: 14px; height: 14px; display: inline-block; vertical-align: middle; flex: 0 0 auto; pointer-events: none; }
 /* let drag initiate on the draggable badge/li, not on inner icons/text */
-.col-msg .badge > *, .reflist li .ricon, .reflist li .dot, .reflist li .rname, .reflist li .here, .reflist li .dl { pointer-events: none; }
+.col-branch .badge > *, .col-tag .badge > *, .reflist li .ricon, .reflist li .dot, .reflist li .rname, .reflist li .here, .reflist li .dl { pointer-events: none; }
 .side-head .ic, .reflist .ricon .ic { color: var(--muted); }
 .badge .ic { width: 12px; height: 12px; margin-right: 3px; }
 .reflist .rname { overflow: hidden; text-overflow: ellipsis; }
@@ -652,7 +652,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #col-gear:hover { color: var(--fg); border-color: var(--border); background: var(--bg3); }
 
-#graphpane.hide-refs .col-msg .refs { display: none; }
+#graphpane.hide-refs .col-branch,
+#graphpane.hide-refs .ch-branch,
+#graphpane.hide-tags .col-tag,
+#graphpane.hide-tags .ch-tag { display: none; }
 /* with the message hidden, let the author absorb the free space so the
    date/sha stay right-aligned instead of bunching up on the left */
 #graphpane.hide-message .col-msg .summary { display: none; }
@@ -660,6 +663,25 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #graphpane.hide-author .col-msg .author { display: none; }
 #graphpane.hide-date .col-msg .date { display: none; }
 #graphpane.hide-sha .col-msg .hash { display: none; }
+/* floating "… ago" marker at the right edge, only on the first row of each
+   age bucket — a date rail without a date on every single line */
+.agomark {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 7px;
+  border-radius: 8px;
+  white-space: nowrap;
+  color: var(--muted);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+.crow.selected .agomark { background: var(--sel); }
 #graphpane.hide-graph .col-graph,
 #graphpane.hide-graph #graph-svg,
 #graphpane.hide-graph .ch-graph { display: none; }
@@ -689,10 +711,22 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   letter-spacing: .5px;
   color: var(--muted);
 }
-.ch { display: flex; align-items: center; padding: 0 12px; }
+.ch { display: flex; align-items: center; padding: 0 12px; position: relative; }
+/* drag handle on a column's right edge */
+.colgrip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 6;
+}
+.colgrip:hover { background: var(--accent); opacity: 0.35; }
 /* the graph column can be as narrow as ~30px on linear repos — clip the label
    instead of letting it spill into the message column */
 .ch-graph {
+  width: var(--graph-w, 200px);
   flex: 0 0 auto;
   border-right: 1px solid var(--border);
   overflow: hidden;
@@ -722,6 +756,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   opacity: 0.55;
 }
 #graph-hbar:hover #graph-hthumb { opacity: 0.9; }
+.ch-branch { width: var(--branch-w, 170px); flex: 0 0 auto; border-right: 1px solid var(--border); overflow: hidden; }
+.ch-tag { width: var(--tag-w, 110px); flex: 0 0 auto; border-right: 1px solid var(--border); overflow: hidden; }
 .ch-msg { flex: 1 1 auto; }
 
 #scroll {
@@ -769,18 +805,22 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .crow.dim.on-head { box-shadow: none; }
 .crow.dim.on-head .col-msg .summary { font-weight: 400; }
 
-/* ref pills now sit inline, directly before the commit message. Capped width
-   so a long branch name can never crowd out the message text. */
-.col-msg .refs {
-  flex: 0 1 auto;
-  display: inline-flex;
+/* Branches and tags each get their own column: sharing one, a tag next to a
+   long branch name was simply clipped away. */
+.col-branch,
+.col-tag {
+  flex: 0 0 auto;
+  display: flex;
   align-items: center;
   gap: 4px;
-  max-width: 45%;
+  padding: 0 8px;
   overflow: hidden;
-  margin-right: 8px;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
 }
+.col-branch { width: var(--branch-w, 170px); }
+.col-tag { width: var(--tag-w, 110px); }
 .col-graph {
+  width: var(--graph-w, 200px);
   flex: 0 0 auto;
   height: 100%;
   border-right: 1px solid rgba(255,255,255,0.05);
@@ -827,7 +867,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   flex: 0 0 auto;
   opacity: 0.7;
 }
-.col-msg .refs .badge {
+.col-branch .badge, .col-tag .badge {
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -845,7 +885,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   flex: 0 0 auto;
   user-select: none;
 }
-.col-msg .badge[data-refkind="local"] { cursor: grab; }
+.col-branch .badge[data-refkind="local"] { cursor: grab; }
 .badge.drop-target { outline: 1px dashed var(--accent); outline-offset: 1px; background: var(--sel); }
 /* Badges carry their LANE's colour (--bc, set per row), so a pill visibly
    belongs to a line in the graph instead of blending into the message text. */
@@ -856,6 +896,14 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-color: var(--bc-bd, #33455a);
   color: var(--fg);
 }
+/* tags are not branches — give them one fixed cream tone instead of the lane
+   colour, so a tag reads as a tag no matter which line it sits on */
+.badge.tag {
+  background: rgba(240, 226, 190, 0.16);
+  border-color: rgba(240, 226, 190, 0.5);
+  color: #f0e2be;
+}
+.badge.tag .ic { color: #f0e2be; }
 .badge .bpre { opacity: 0.55; }               /* origin/group/ prefix */
 .badge .bleaf { font-weight: 600; }           /* the branch name itself */
 .badge .ic { color: var(--bc, var(--muted)); opacity: 0.9; }

@@ -134,14 +134,23 @@
         <main id="graphpane">
           <div id="scroll">
             <div id="col-headers">
+              <div class="ch ch-branch">
+                <span class="ch-lbl">Branch</span>
+                <div class="colgrip" data-col="branch" title="Drag to resize"></div>
+              </div>
+              <div class="ch ch-tag">
+                <span class="ch-lbl">Tag</span>
+                <div class="colgrip" data-col="tag" title="Drag to resize"></div>
+              </div>
               <div class="ch ch-graph">
                 <span class="ch-lbl">Graph</span>
                 <div id="graph-hbar" class="hidden" title="Scroll the graph sideways (shift+wheel over the graph)">
                   <div id="graph-hthumb"></div>
                 </div>
+                <div class="colgrip" data-col="graph" title="Drag to resize"></div>
               </div>
               <div class="ch ch-msg">
-                <span class="ch-lbl">Branch / Tag &middot; Commit message</span>
+                <span class="ch-lbl">Commit message</span>
                 <button id="col-gear" title="Column settings">⚙</button>
               </div>
             </div>
