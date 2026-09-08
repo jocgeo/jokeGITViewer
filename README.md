@@ -75,10 +75,24 @@ bundled libgit2, no heavy runtime. Small binary, native window.
 
 ### Toolbar & actions
 - **Recovery**: right-click a repository tab or its path → **Recover a commit (reflog)…**.
-   Browse local reflog entries, filter the loaded history, and recover a commit into
+   Browse local reflog entries, filter the loaded history, preview changed files
+   and their colored diffs against the first parent, and recover a commit into
    a new branch without switching branches or changing staged/unstaged work.
    Recovery requires the commit to still exist locally; expired reflog history is unavailable.
 - **Fetch · Pull · Push** (current branch only) **· Branch · Stash · Terminal · Search**
+- **Multiple remotes**: Push uses `branch.<name>.pushRemote`, then
+  `remote.pushDefault`, then the branch's upstream remote. With no configured
+  destination, it uses the sole remote or asks you to choose. Push targets the
+  upstream branch name when pushing to that remote; pushing to a separate fork
+  preserves the Pull upstream. A first push sets upstream when none exists.
+  Fetch updates all remotes; Pull follows Git's configured upstream. Remote tag
+  push/delete actions let you choose a remote. Repository chat still uses `origin`.
+- **Remote manager**: right-click a repository tab or its path → **Manage remotes…**
+  to add, rename, or remove remotes, edit fetch/push URLs, and set the current
+  branch's upstream and push remote. Fetch remote branches from the manager to
+  populate the upstream list. Removing a remote removes its local tracking refs,
+  not the remote repository or local branches. Configurations with multiple URLs
+  are displayed and left for editing with Git.
 - Hover any button for the exact `git` command it runs; buttons grey out with a
   spinner while an action runs
 - Right-click branches, commits, stashes, tags, files and repos for context
@@ -121,6 +135,14 @@ Grab an installer or the portable build from the
 - macOS: `.dmg` (universal)
 
 ## Build & run from source
+
+Frontend code is organized around `src/main.ts` for application state and event
+wiring, `models.ts` for shared types, `graph-model.ts` for graph nodes and lane
+assignment, `highlighting.ts` for syntax highlighting, `html.ts` for HTML escaping,
+and `ui/dialogs.ts` / `ui/context-menu.ts` for reusable UI controls. The recovery
+window lives in `recovery.ts` with its own stylesheet. `src/diff/` contains
+diff rendering, entry parsing, staging patches, and cherry-pick patches. Rendering
+receives its syntax language explicitly; patch builders are independent of the UI.
 
 ```bash
 npm install

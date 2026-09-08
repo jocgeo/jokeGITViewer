@@ -20,8 +20,11 @@ function init(name, content, file='f.txt') {
   ok(git(p,['config','user.name','Review']));ok(git(p,['config','user.email','review@example.invalid']));
   fs.writeFileSync(path.join(p,file),content);ok(git(p,['add','.']));ok(git(p,['commit','-qm','base']));return p;
 }
-const context={};vm.createContext(context);
-vm.runInContext(ts.transpile(source.slice(source.indexOf('function buildLinePatch('),source.indexOf('async function stageSingleLine('))),context);
+const context={exports:{}};vm.createContext(context);
+const stagingSource = fs.readFileSync(path.join(sourceRoot,'src/diff/staging-patches.ts'),'utf8');
+vm.runInContext(ts.transpileModule(stagingSource, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText,context);
 for (const trailing of ['', '\n']) {
   for(const reverse of [false,true]) {
     for(const kind of ['del','add']) {
@@ -29,7 +32,7 @@ for (const trailing of ['', '\n']) {
       fs.writeFileSync(path.join(p,'f.txt'),'new'+trailing);
       if(reverse) ok(git(p,['add','.']));
       const diff=ok(git(p,['diff',...(reverse?['--cached']:[]),'--','f.txt']));
-      const built=context.buildLinePatch(diff,{kind,ln:1},reverse);
+      const built=context.exports.buildLinePatch(diff,{kind,ln:1},reverse);
       assert(built);
       ok(git(p,['apply','--cached',...(reverse?['--reverse']:[]),'-'],built.patch));
       const result=ok(git(p,['show',':f.txt']));

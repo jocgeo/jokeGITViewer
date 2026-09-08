@@ -1,4 +1,8 @@
 :root {
+  color-scheme: dark;
+  --scroll-track: #1a1a25;
+  --scroll-thumb: #505069;
+  --scroll-thumb-hover: #71718e;
   --bg: #1e1e2a;
   --bg2: #262635;
   --bg3: #2f2f42;
@@ -13,6 +17,24 @@
 }
 
 * { box-sizing: border-box; }
+
+/* Shared dark scrollbars: tabs, graph, diffs, sidebars and dialogs. */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--scroll-track); }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 3px solid var(--scroll-track);
+  border-radius: 10px;
+  min-height: 28px;
+  min-width: 28px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-thumb:active { background: var(--accent); }
+::-webkit-scrollbar-corner { background: var(--scroll-track); }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) var(--scroll-track); }
+}
 
 html, body { margin: 0; height: 100%; background: var(--bg); }
 
@@ -743,7 +765,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   bottom: 2px;
   height: 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--scroll-track);
   cursor: pointer;
 }
 #graph-hbar.hidden { display: none; }
@@ -752,10 +774,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   top: 0;
   bottom: 0;
   border-radius: 3px;
-  background: var(--muted);
-  opacity: 0.55;
+  background: var(--scroll-thumb);
 }
-#graph-hbar:hover #graph-hthumb { opacity: 0.9; }
+#graph-hbar:hover #graph-hthumb { background: var(--scroll-thumb-hover); }
+#graph-hbar:active #graph-hthumb { background: var(--accent); }
 .ch-branch { width: var(--branch-w, 170px); flex: 0 0 auto; border-right: 1px solid var(--border); overflow: hidden; }
 .ch-tag { width: var(--tag-w, 110px); flex: 0 0 auto; border-right: 1px solid var(--border); overflow: hidden; }
 .ch-msg { flex: 1 1 auto; }

@@ -1,0 +1,12 @@
+#remote-manager { width: min(760px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; padding: 22px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+#remote-manager::backdrop { background: #0009; }
+#remote-manager .rm-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+#remote-manager h2, #remote-manager h3 { margin: 0 0 10px; }
+#remote-manager p { line-height: 1.5; overflow-wrap: anywhere; }
+#remote-manager .rm-path { color: var(--muted); }
+#remote-manager .rm-card { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 6px; }
+#remote-manager label { display: block; margin: 10px 0 6px; }
+#remote-manager input, #remote-manager select { display: block; width: 100%; margin-top: 5px; padding: 8px; color: var(--fg); background: var(--bg2); border: 1px solid var(--border); }
+#remote-manager button { padding: 7px 11px; margin-right: 6px; }
+#remote-manager .rm-remove { margin-top: 14px; }
+#remote-manager .rm-status { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; margin-bottom: 0; }

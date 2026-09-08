@@ -28,3 +28,14 @@
 #recovery-dialog .recovery-form label { flex: 1; }
 #recovery-dialog .recovery-status { overflow-wrap: anywhere; min-height: 1.5em; }
 #recovery-dialog small { color: #b4b4cb; }
+#recovery-dialog .recovery-preview { margin-top: 16px; border-top: 1px solid #555568; padding-top: 12px; }
+#recovery-dialog .recovery-preview h3 { margin: 0; font-size: 15px; }
+#recovery-dialog .recovery-preview-info { overflow-wrap: anywhere; color: #b4b4cb; font-size: 12px; }
+#recovery-dialog .recovery-files { display: block; width: 100%; margin-top: 6px; padding: 8px; color: inherit; background: #232334; border: 1px solid #555568; }
+#recovery-dialog .recovery-preview-status { font-size: 12px; overflow-wrap: anywhere; }
+#recovery-dialog .recovery-diff { max-height: 32vh; overflow: auto; background: #1e1e2a; margin: 10px 0 0; font: 12px/1.5 Consolas, monospace; tab-size: 4; }
+#recovery-dialog .recovery-diff:empty { display: none; }
+#recovery-dialog .recovery-diff span { display: block; min-width: max-content; padding: 0 8px; white-space: pre; }
+#recovery-dialog .diff-added { color: #a4edb1; background: #23402b; }
+#recovery-dialog .diff-removed { color: #ffb2b2; background: #45282d; }
+#recovery-dialog .diff-hunk { color: #afcaff; background: #2a334a; }

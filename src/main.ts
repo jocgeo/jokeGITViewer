@@ -1,253 +1,22 @@
+import { splitHunkPatches, buildLinePatch } from "./diff/staging-patches";
+import { buildCpPatch } from "./diff/cherry-pick-patches";
+import { parseDiffEntries } from "./diff/entries";
+import { intraline, renderUnifiedDiff } from "./diff/render";
+import type { RefInfo, FileChange, StashEntry, RepoData, GNode, Placed, Tab } from "./models";
+import hljs, { langForFile, hlLines, hlLine } from "./highlighting";
+import { escapeHtml } from "./html";
+import { WIP_ID, STASH_COLOR, WIP_COLOR, COLORS, refKey, buildNodes, layout } from "./graph-model";
+import { promptModal, errorModal, choiceModal, confirmModal } from "./ui/dialogs";
+import { showMenu, closeMenu } from "./ui/context-menu";
+import type { MenuItem } from "./ui/context-menu";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { showRecovery } from "./recovery";
+import { showRemoteManager } from "./remote-manager";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import hljs from "highlight.js/lib/core";
-import hlC from "highlight.js/lib/languages/c";
-import hlCpp from "highlight.js/lib/languages/cpp";
-import hlCsharp from "highlight.js/lib/languages/csharp";
-import hlCss from "highlight.js/lib/languages/css";
-import hlBash from "highlight.js/lib/languages/bash";
-import hlDockerfile from "highlight.js/lib/languages/dockerfile";
-import hlGo from "highlight.js/lib/languages/go";
-import hlIni from "highlight.js/lib/languages/ini";
-import hlJava from "highlight.js/lib/languages/java";
-import hlJavascript from "highlight.js/lib/languages/javascript";
-import hlJson from "highlight.js/lib/languages/json";
-import hlKotlin from "highlight.js/lib/languages/kotlin";
-import hlLua from "highlight.js/lib/languages/lua";
-import hlMakefile from "highlight.js/lib/languages/makefile";
-import hlMarkdown from "highlight.js/lib/languages/markdown";
-import hlPerl from "highlight.js/lib/languages/perl";
-import hlPhp from "highlight.js/lib/languages/php";
-import hlPowershell from "highlight.js/lib/languages/powershell";
-import hlPython from "highlight.js/lib/languages/python";
-import hlRuby from "highlight.js/lib/languages/ruby";
-import hlRust from "highlight.js/lib/languages/rust";
-import hlScss from "highlight.js/lib/languages/scss";
-import hlSql from "highlight.js/lib/languages/sql";
-import hlSwift from "highlight.js/lib/languages/swift";
-import hlTypescript from "highlight.js/lib/languages/typescript";
-import hlXml from "highlight.js/lib/languages/xml";
-import hlYaml from "highlight.js/lib/languages/yaml";
-import "highlight.js/styles/github-dark-dimmed.css";
-
-hljs.registerLanguage("c", hlC);
-hljs.registerLanguage("cpp", hlCpp);
-hljs.registerLanguage("csharp", hlCsharp);
-hljs.registerLanguage("css", hlCss);
-hljs.registerLanguage("bash", hlBash);
-hljs.registerLanguage("dockerfile", hlDockerfile);
-hljs.registerLanguage("go", hlGo);
-hljs.registerLanguage("ini", hlIni);
-hljs.registerLanguage("java", hlJava);
-hljs.registerLanguage("javascript", hlJavascript);
-hljs.registerLanguage("json", hlJson);
-hljs.registerLanguage("kotlin", hlKotlin);
-hljs.registerLanguage("lua", hlLua);
-hljs.registerLanguage("makefile", hlMakefile);
-hljs.registerLanguage("markdown", hlMarkdown);
-hljs.registerLanguage("perl", hlPerl);
-hljs.registerLanguage("php", hlPhp);
-hljs.registerLanguage("powershell", hlPowershell);
-hljs.registerLanguage("python", hlPython);
-hljs.registerLanguage("ruby", hlRuby);
-hljs.registerLanguage("rust", hlRust);
-hljs.registerLanguage("scss", hlScss);
-hljs.registerLanguage("sql", hlSql);
-hljs.registerLanguage("swift", hlSwift);
-hljs.registerLanguage("typescript", hlTypescript);
-hljs.registerLanguage("xml", hlXml);
-hljs.registerLanguage("yaml", hlYaml);
-
-// file extension -> highlight.js language id
-const HL_EXT: Record<string, string> = {
-  c: "c", h: "c",
-  cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp", hxx: "cpp", ino: "cpp",
-  cs: "csharp",
-  css: "css",
-  sh: "bash", bash: "bash", zsh: "bash",
-  dockerfile: "dockerfile",
-  go: "go",
-  ini: "ini", toml: "ini", cfg: "ini", conf: "ini", properties: "ini",
-  java: "java",
-  js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-  json: "json",
-  kt: "kotlin", kts: "kotlin",
-  lua: "lua",
-  mk: "makefile", makefile: "makefile",
-  md: "markdown", markdown: "markdown",
-  pl: "perl", pm: "perl",
-  php: "php",
-  ps1: "powershell", psm1: "powershell", psd1: "powershell",
-  py: "python", pyw: "python",
-  rb: "ruby",
-  rs: "rust",
-  scss: "scss", sass: "scss", less: "scss",
-  sql: "sql",
-  swift: "swift",
-  ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-  html: "xml", htm: "xml", xml: "xml", svg: "xml", xaml: "xml", vue: "xml", svelte: "xml",
-  yml: "yaml", yaml: "yaml",
-};
-
-function langForFile(file: string): string | null {
-  const base = file.split("/").pop()?.toLowerCase() ?? "";
-  if (base === "dockerfile") return "dockerfile";
-  if (base === "makefile" || base === "gnumakefile") return "makefile";
-  if (base === "cmakelists.txt") return "makefile";
-  const ext = base.includes(".") ? base.split(".").pop()! : "";
-  return HL_EXT[ext] ?? null;
-}
-
-// Highlight a whole block at once and hand back per-line HTML.
-// Highlighting line-by-line breaks anything that spans lines (block comments,
-// multi-line strings): the continuation lines have no idea they are inside it.
-// So we highlight the joined text, then split the result on newlines, closing
-// every still-open span at the end of a line and reopening it on the next.
-function hlLines(lines: string[], lang: string | null): string[] {
-  if (!lang) return lines.map(escapeHtml);
-  let html: string;
-  try {
-    html = hljs.highlight(lines.join("\n"), {
-      language: lang,
-      ignoreIllegals: true,
-    }).value;
-  } catch {
-    return lines.map(escapeHtml);
-  }
-  const out: string[] = [];
-  const open: string[] = []; // stack of currently open <span ...> tags
-  let cur = "";
-  let i = 0;
-  while (i < html.length) {
-    const ch = html[i];
-    if (ch === "<") {
-      const end = html.indexOf(">", i);
-      if (end === -1) {
-        cur += html.slice(i);
-        break;
-      }
-      const tag = html.slice(i, end + 1);
-      if (tag.startsWith("</")) open.pop();
-      else open.push(tag);
-      cur += tag;
-      i = end + 1;
-    } else if (ch === "\n") {
-      out.push(cur + "</span>".repeat(open.length)); // close for this line
-      cur = open.join(""); // ...and reopen on the next
-      i++;
-    } else {
-      cur += ch;
-      i++;
-    }
-  }
-  out.push(cur);
-  // hljs never drops or adds lines, but stay defensive about the mapping
-  while (out.length < lines.length) out.push("");
-  return out.slice(0, lines.length);
-}
-
-// highlight ONE line of code (stateless per line — good enough for diffs);
-// falls back to plain escaping for unknown languages or hljs errors
-function hlLine(text: string, lang: string | null): string {
-  if (!lang || !text) return escapeHtml(text);
-  try {
-    return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
-  } catch {
-    return escapeHtml(text);
-  }
-}
-
-// ---- types mirrored from the Rust backend ----
-interface Commit {
-  hash: string;
-  parents: string[];
-  author: string;
-  email: string;
-  time: number;
-  summary: string;
-}
-interface RefInfo {
-  name: string;
-  full: string;
-  target: string;
-  kind: "local" | "remote" | "tag" | "other";
-  is_head: boolean;
-  time: number;
-}
-interface FileChange {
-  status: string;
-  path: string;
-}
-interface StashEntry {
-  selector: string;
-  hash: string;
-  parents: string[];
-  time: number;
-  message: string;
-}
-interface WipStatus {
-  parent: string;
-  staged: number;
-  unstaged: number;
-  untracked: number;
-}
-interface ConflictState {
-  active: boolean;
-  kind: string; // merge | rebase | cherry-pick | revert | ""
-  files: string[];
-}
-interface RepoData {
-  path: string;
-  head: string;
-  head_branch: string;
-  refs: RefInfo[];
-  commits: Commit[];
-  stashes: StashEntry[];
-  wip: WipStatus | null;
-  conflict: ConflictState;
-  describe: string;
-  submodules: { name: string; path: string; abs: string }[];
-  fingerprint: string;
-}
-
-// ---- unified graph node ----
-type NodeKind = "commit" | "stash" | "wip";
-interface GNode {
-  id: string; // commit/stash hash, or "__WIP__"
-  kind: NodeKind;
-  parents: string[];
-  time: number;
-  commit?: Commit;
-  stash?: StashEntry;
-  wip?: WipStatus;
-}
-
-interface Placed {
-  node: GNode;
-  row: number;
-  lane: number;
-  color: string;
-}
-
-interface Tab {
-  repo: RepoData;
-  selected: string | null; // node id
-  nodes: GNode[];
-  placed: Placed[];
-  fingerprint?: string; // cheap repo-state signature for auto-refresh
-  remoteTags?: Set<string>; // tag names known to exist on origin
-  hint?: { hash: string; branch: string }; // "which branch" ghost for selected commit
-  hidden?: Set<string>; // ref keys hidden from the graph
-  stale?: boolean; // loaded from cache, needs a background refresh
-  parentPath?: string; // set when this tab is a submodule of another repo
-  hlOff?: boolean; // lineage highlight cleared (click outside the graph)
-}
-
 // ---- layout constants ----
 const ROW_H = 30;
 const PAD = 14;
@@ -262,19 +31,6 @@ const BRANCH_W = 170; // branch column, leftmost
 const TAG_W = 110; // tag column, right of the branches
 
 let graphPanX = 0; // horizontal scroll offset inside the graph column
-const WIP_ID = "__WIP__";
-const STASH_COLOR = "#e3b341";
-const WIP_COLOR = "#ff9d5c";
-// per-branch-line colors. Deliberately DESATURATED: hue alone separates the
-// branches, while the muted tone keeps the graph from shouting over the
-// commit messages (bright saturated lanes make everything feel equally loud).
-const COLORS = [
-  "#4aa3ff", "#3fd07a", "#ffc247", "#c77dff",
-  "#ff7eb6", "#2fd4d4", "#a8e337", "#ff9d4d",
-  "#6f8cff", "#26d9a3", "#ffd23f", "#b96bff",
-  "#ff6b8a", "#38bdf8", "#84e04a", "#ffab52",
-];
-
 // ---- app state ----
 const tabs: Tab[] = [];
 let active = -1;
@@ -368,7 +124,6 @@ function closeSearch() {
   box.innerHTML = "";
 }
 
-const refKey = (r: { kind: string; name: string }) => `${r.kind}:${r.name}`;
 
 // drag-drop: menu shown when a branch is dropped onto another
 // drag a splitter to resize the sidebar / detail panel
@@ -462,143 +217,6 @@ function toggleBranchHidden(t: Tab, key: string) {
   t.nodes = buildNodes(t.repo, t.hidden);
   renderGraph(t);
   renderSidebar(t);
-}
-
-function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
-  // when branches are hidden, keep only commits still reachable from a visible
-  // ref / HEAD / stash base / WIP parent
-  let commits = repo.commits;
-  if (hidden && hidden.size) {
-    // hiding a branch also hides its local/remote twin (same short name),
-    // otherwise the twin keeps the commits visible.
-    const remoteShort = (name: string) => name.split("/").slice(1).join("/");
-    const hiddenLocal = new Set(
-      [...hidden].filter((k) => k.startsWith("local:")).map((k) => k.slice(6))
-    );
-    const hiddenRemote = new Set(
-      [...hidden].filter((k) => k.startsWith("remote:")).map((k) => remoteShort(k.slice(7)))
-    );
-    const isHidden = (r: RefInfo) => {
-      if (hidden.has(refKey(r))) return true;
-      if (r.kind === "local" && hiddenRemote.has(r.name)) return true;
-      if (r.kind === "remote" && hiddenLocal.has(remoteShort(r.name))) return true;
-      return false;
-    };
-
-    const map = new Map(repo.commits.map((c) => [c.hash, c]));
-    const tips: string[] = [];
-    for (const r of repo.refs) if (!isHidden(r)) tips.push(r.target);
-    // keep HEAD only if its branch isn't the one being hidden
-    const headHidden =
-      !!repo.head_branch && hiddenLocal.has(repo.head_branch);
-    if (repo.head && !headHidden) tips.push(repo.head);
-    for (const s of repo.stashes) if (s.parents[0]) tips.push(s.parents[0]);
-    if (repo.wip?.parent && !headHidden) tips.push(repo.wip.parent);
-    const seen = new Set<string>();
-    const stack = [...tips];
-    while (stack.length) {
-      const h = stack.pop()!;
-      if (seen.has(h)) continue;
-      seen.add(h);
-      const c = map.get(h);
-      if (c) for (const p of c.parents) stack.push(p);
-    }
-    commits = repo.commits.filter((c) => seen.has(c.hash));
-  }
-
-  const nodes: GNode[] = [];
-  if (repo.wip) {
-    nodes.push({
-      id: WIP_ID,
-      kind: "wip",
-      parents: repo.wip.parent ? [repo.wip.parent] : [],
-      time: Number.MAX_SAFE_INTEGER,
-      wip: repo.wip,
-    });
-  }
-  for (const s of repo.stashes) {
-    nodes.push({
-      id: s.hash,
-      kind: "stash",
-      parents: s.parents.slice(0, 1), // connect to base commit only
-      time: s.time,
-      stash: s,
-    });
-  }
-  for (const c of commits) {
-    nodes.push({
-      id: c.hash,
-      kind: "commit",
-      parents: c.parents,
-      time: c.time,
-      commit: c,
-    });
-  }
-  // newest first; WIP pinned on top via MAX time. Stable for equal times.
-  nodes.sort((a, b) => b.time - a.time);
-  return nodes;
-}
-
-// ---- lane assignment (generic over node id / parents) ----
-function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
-  const lanes: (string | null)[] = [];
-  const placed: Placed[] = [];
-  let maxLane = 0;
-
-  const freeSlot = (): number => {
-    const i = lanes.indexOf(null);
-    if (i !== -1) return i;
-    lanes.push(null);
-    return lanes.length - 1;
-  };
-
-  // Color per BRANCH LINE, not per lane: a chain of first-parent links keeps
-  // ONE color from its tip down — so it's obvious where a branch starts, ends
-  // or gets merged, even when lanes are reused or the chain shifts lanes.
-  const chainOf = new Map<string, number>();
-  let nextChain = 0;
-
-  nodes.forEach((n, row) => {
-    let lane = lanes.indexOf(n.id);
-    if (lane === -1) lane = freeSlot();
-
-    for (let l = 0; l < lanes.length; l++) {
-      if (l !== lane && lanes[l] === n.id) lanes[l] = null;
-    }
-
-    if (n.parents.length === 0) {
-      lanes[lane] = null;
-    } else {
-      lanes[lane] = n.parents[0];
-      for (let p = 1; p < n.parents.length; p++) {
-        const ph = n.parents[p];
-        if (lanes.indexOf(ph) === -1) lanes[freeSlot()] = ph;
-      }
-    }
-
-    maxLane = Math.max(maxLane, lane, lanes.length - 1);
-    // Only COMMITS take a chain slot. Stash/WIP have their own fixed colours,
-    // and letting them consume a slot shifted every branch one step along the
-    // palette whenever the WIP node appeared or disappeared — so committing
-    // recoloured the whole graph.
-    let color: string;
-    if (n.kind === "stash") {
-      color = STASH_COLOR;
-    } else if (n.kind === "wip") {
-      color = WIP_COLOR;
-    } else {
-      let chain = chainOf.get(n.id);
-      if (chain === undefined) chain = nextChain++; // a new branch tip starts here
-      // the first (topmost) child carries the chain on through its first parent
-      if (n.parents.length && !chainOf.has(n.parents[0])) {
-        chainOf.set(n.parents[0], chain);
-      }
-      color = COLORS[chain % COLORS.length];
-    }
-    placed.push({ node: n, row, lane, color });
-  });
-
-  return { placed, maxLane };
 }
 
 const TIP_SZ = 15; // badge drawn on a branch/tag tip
@@ -1189,7 +807,7 @@ function refUnits(refsHere: RefInfo[]): RefUnit[] {
   return units;
 }
 
-let gRemoteTags = new Set<string>(); // tags on origin, for the active render
+let gRemoteTags = new Set<string>(); // tags on the configured remote, for the active render
 let dragSource: string | null = null; // branch being dragged (drag & drop)
 let dragSourceRemote = false; // dragged branch is a remote-tracking ref
 
@@ -1203,7 +821,7 @@ function unitBadge(u: RefUnit, laneColor?: string): string {
     if (gRemoteTags.has(u.name)) {
       icons += icon("remote"); // also on remote
     } else {
-      extra = `<span class="tagpush" title="local only — not pushed to origin">↑</span>`;
+      extra = `<span class="tagpush" title="not confirmed on the configured remote">↑</span>`;
     }
   }
   const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
@@ -1225,7 +843,7 @@ function unitBadge(u: RefUnit, laneColor?: string): string {
   // name back — plus where it exists (local / origin / tag)
   const where = [
     u.local ? "local" : "",
-    u.remote ? "on origin" : "",
+    u.remote ? "remote branch" : "",
     u.tag ? "tag" : "",
     u.isHead ? "checked out" : "",
   ].filter(Boolean);
@@ -1238,7 +856,7 @@ function unitBadge(u: RefUnit, laneColor?: string): string {
   );
 }
 
-// fetch the set of tags on origin (network), then re-render to mark badges
+// Fetch tags on the configured remote (network), then re-render badges.
 async function refreshRemoteTags(t: Tab) {
   try {
     const tags = await invoke<string[]>("remote_tags", { path: t.repo.path });
@@ -1248,7 +866,8 @@ async function refreshRemoteTags(t: Tab) {
       renderGraph(t);
     }
   } catch {
-    /* offline / no origin — leave tags as local-only */
+    t.remoteTags = new Set();
+    if (cur() === t) { gRemoteTags = t.remoteTags; renderGraph(t); }
   }
 }
 
@@ -3490,7 +3109,7 @@ function showDiffText(title: string, diff: string) {
   $("diffview-title").textContent = title;
   const body = $("diffview-body");
   body.innerHTML =
-    renderUnifiedDiff(diff) ||
+    renderUnifiedDiff(diff, hlLang) ||
     "<div class='dl ctx'><span class='dc'>(no changes)</span></div>";
   showDiffView(true);
   buildMinimap();
@@ -3929,40 +3548,6 @@ async function openWipDiff(path: string, file: string, staged: boolean) {
   }
 }
 
-// split a unified diff into per-hunk mini-patches (header + one hunk each)
-function splitHunkPatches(diff: string): { patch: string; newFile: boolean }[] {
-  const lines = diff.split("\n");
-  let minus = "";
-  let plus = "";
-  const hunks: string[][] = [];
-  let cur: string[] | null = null;
-  for (const line of lines) {
-    if (line.startsWith("--- ")) {
-      minus = line;
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      plus = line;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      if (cur) hunks.push(cur);
-      cur = [line];
-      continue;
-    }
-    if (
-      cur &&
-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ") || line.startsWith("\\"))
-    ) {
-      cur.push(line);
-    }
-  }
-  if (cur) hunks.push(cur);
-  if (!minus || !plus) return [];
-  const newFile = minus.includes("/dev/null");
-  return hunks.map((h) => ({ patch: `${minus}\n${plus}\n${h.join("\n")}\n`, newFile }));
-}
-
 // GitKraken-style hunk bars: Stage/Unstage + Discard buttons on every @@ row
 function decorateHunkRows(staged: boolean) {
   const c = wipDiffCtx;
@@ -4044,113 +3629,6 @@ function decorateStageableRows(staged: boolean) {
   });
 }
 
-// Build a minimal patch that stages/unstages ONLY the selected changed line.
-// Stage    (index→worktree diff): other + lines dropped, other − lines → context.
-// Unstage  (HEAD→index diff, applied in reverse): other + lines → context,
-//          other − lines dropped — so the patch's "new" side matches the index.
-function buildLinePatch(
-  diff: string,
-  sel: { kind: "add" | "del"; ln: number },
-  forUnstage: boolean
-): { patch: string; newFile: boolean } | null {
-  const lines = diff.split("\n");
-  let minus = "";
-  let plus = "";
-  let newFile = false;
-  let oldN = 0;
-  let newN = 0;
-  let hunkOldStart = 0;
-  let hunkNewStart = 0;
-  let cur: string[] = [];
-  let oldCnt = 0;
-  let newCnt = 0;
-  let hasSel = false;
-  let done: string | null = null;
-  let keptPreviousLine = false;
-
-  const finishHunk = (): string | null => {
-    if (!hasSel || !cur.length) return null;
-    const ns = forUnstage ? hunkNewStart : Math.max(hunkOldStart, 1);
-    return (
-      `@@ -${hunkOldStart},${oldCnt} +${ns},${newCnt} @@\n` + cur.join("\n") + "\n"
-    );
-  };
-
-  for (const line of lines) {
-    if (line === "") continue;
-    if (line.startsWith("--- ")) {
-      minus = line;
-      if (line.includes("/dev/null")) newFile = true;
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      plus = line;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      done = done ?? finishHunk();
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (!m) continue;
-      oldN = +m[1];
-      newN = +m[2];
-      hunkOldStart = oldN;
-      hunkNewStart = newN;
-      cur = [];
-      oldCnt = 0;
-      newCnt = 0;
-      hasSel = false;
-      keptPreviousLine = false;
-      continue;
-    }
-    if (!minus || done) continue; // header noise / already built
-    if (line.startsWith("\\")) {
-      // This marker belongs to the preceding source line. Carry it only
-      // when that line survived selection (including converted context).
-      if (keptPreviousLine) cur.push(line);
-      continue;
-    }
-    if (line.startsWith("+")) {
-      const isSel = sel.kind === "add" && newN === sel.ln;
-      newN++;
-      keptPreviousLine = isSel || forUnstage;
-      if (isSel) {
-        cur.push(line);
-        newCnt++;
-        hasSel = true;
-      } else if (forUnstage) {
-        cur.push(" " + line.slice(1)); // stays in the index → context
-        oldCnt++;
-        newCnt++;
-      } // else: dropped — not being staged
-      continue;
-    }
-    if (line.startsWith("-")) {
-      const isSel = sel.kind === "del" && oldN === sel.ln;
-      oldN++;
-      keptPreviousLine = isSel || !forUnstage;
-      if (isSel) {
-        cur.push(line);
-        oldCnt++;
-        hasSel = true;
-      } else if (!forUnstage) {
-        cur.push(" " + line.slice(1)); // deletion not staged → line stays
-        oldCnt++;
-        newCnt++;
-      } // else: dropped — never made it into the index
-      continue;
-    }
-    keptPreviousLine = true;
-    cur.push(line); // plain context
-    oldCnt++;
-    newCnt++;
-    oldN++;
-    newN++;
-  }
-  done = done ?? finishHunk();
-  if (!done || !minus || !plus) return null;
-  return { patch: `${minus}\n${plus}\n${done}`, newFile };
-}
-
 async function stageSingleLine(kind: "add" | "del", ln: number) {
   const c = wipDiffCtx;
   if (!c) return;
@@ -4173,134 +3651,10 @@ async function stageSingleLine(kind: "add" | "del", ln: number) {
   }
 }
 
-// ---- cherry-pick patch builder (single line OR whole hunk) ----
-// Works EXACTLY like the staging patch builder: the diff's old side is the
-// working tree itself (diff_worktree_to_commit uses -R), so the patch base
-// always matches the apply target — no guessing, no drifting line numbers.
-// addLns: new-side line numbers to insert; delLns: old-side line numbers to
-// remove. A changed line = its del + its add together (replacement).
-function buildCpPatch(
-  diff: string,
-  addLns: number[],
-  delLns: number[],
-  ctx = 3
-): string | null {
-  const adds = new Set(addLns);
-  const dels = new Set(delLns);
-  const lines = diff.split("\n");
-  let file = "";
-  let oldN = 0;
-  let newN = 0;
-  let inHunk = false;
-  let hunkStart = 0;
-  let entries: { t: " " | "-" | "+"; text: string }[] = [];
-  let selIdxs: number[] = [];
-
-  for (const line of lines) {
-    if (line === "") continue;
-    if (line.startsWith("+++ ")) {
-      // -R diffs swap the prefixes too ("+++ a/…"), so strip either one
-      file = line.slice(4).replace(/^[ab]\//, "").trim();
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      if (selIdxs.length) break; // hunk with the selections already collected
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (!m) continue;
-      oldN = +m[1];
-      newN = +m[2];
-      hunkStart = oldN;
-      entries = [];
-      inHunk = true;
-      continue;
-    }
-    if (!inHunk || line.startsWith("\\")) continue;
-    if (line.startsWith("+")) {
-      if (adds.has(newN)) {
-        selIdxs.push(entries.length);
-        entries.push({ t: "+", text: line.slice(1) });
-      } // otherwise: not picked, and not in the target file — drop
-      newN++;
-      continue;
-    }
-    if (line.startsWith("-")) {
-      if (dels.has(oldN)) {
-        selIdxs.push(entries.length);
-        entries.push({ t: "-", text: line.slice(1) });
-      } else {
-        entries.push({ t: " ", text: line.slice(1) }); // deletion not picked
-      }
-      oldN++;
-      continue;
-    }
-    if (line.startsWith(" ")) {
-      entries.push({ t: " ", text: line.slice(1) });
-      oldN++;
-      newN++;
-      continue;
-    }
-    // meta line (diff/index/mode/…): before a hunk only — ignore
-  }
-  if (!selIdxs.length || !file) return null;
-
-  // trim to ±ctx entries around the whole selection span
-  const a = Math.max(0, Math.min(...selIdxs) - ctx);
-  const b = Math.min(entries.length, Math.max(...selIdxs) + ctx + 1);
-  const win = entries.slice(a, b);
-  // old-side offset of the window inside the hunk
-  const skippedOld = entries.slice(0, a).filter((e) => e.t !== "+").length;
-  const oldCnt = win.filter((e) => e.t !== "+").length;
-  const newCnt = win.filter((e) => e.t !== "-").length;
-  // "-0,0" means file creation to git — only valid with no context at all
-  let oldStart = hunkStart + skippedOld;
-  if (oldCnt > 0) oldStart = Math.max(1, oldStart);
-  const body = win.map((e) => e.t + e.text).join("\n");
-  return (
-    `--- a/${file}\n+++ b/${file}\n` +
-    `@@ -${oldStart},${oldCnt} +${oldStart},${newCnt} @@\n${body}\n`
-  );
-}
-
 // ---- interactive cherry-pick view (worktree ⟷ commit, side-by-side) ----
 // Built on ONE diff: working tree (left/old) -> commit's file (right/new).
 // Every row of both panes comes from the same entry list, so the panes are
 // always line-aligned and the numbers shown are the REAL current file lines.
-interface DiffEntry {
-  t: " " | "+" | "-";
-  text: string;
-  oldLn: number; // old-side line number (0 for pure adds)
-  newLn: number; // new-side line number (0 for pure dels)
-}
-
-function parseDiffEntries(diff: string): DiffEntry[] {
-  const out: DiffEntry[] = [];
-  let oldN = 0;
-  let newN = 0;
-  let inHunk = false;
-  for (const line of diff.split("\n")) {
-    if (line === "") continue;
-    if (line.startsWith("@@")) {
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (m) {
-        oldN = +m[1];
-        newN = +m[2];
-        inHunk = true;
-      }
-      continue;
-    }
-    if (!inHunk || line.startsWith("\\") || line.startsWith("+++") || line.startsWith("---"))
-      continue;
-    if (line.startsWith("+")) {
-      out.push({ t: "+", text: line.slice(1), oldLn: 0, newLn: newN++ });
-    } else if (line.startsWith("-")) {
-      out.push({ t: "-", text: line.slice(1), oldLn: oldN++, newLn: 0 });
-    } else if (line.startsWith(" ")) {
-      out.push({ t: " ", text: line.slice(1), oldLn: oldN++, newLn: newN++ });
-    }
-  }
-  return out;
-}
-
 let cpOn = false;
 function setCpBtn(on: boolean) {
   cpOn = on;
@@ -4985,7 +4339,7 @@ async function reloadGraphOnly() {
 async function initialFetch(path: string) {
   const still = () => cur()?.repo.path === path;
   if (!still()) return;
-  setStatus("fetching origin…");
+  setStatus("fetching remotes…");
   try {
     await invoke("fetch", { path });
   } catch {
@@ -4996,7 +4350,7 @@ async function initialFetch(path: string) {
   const t = cur()!;
   await reloadGraphOnly();
   refreshRemoteTags(t);
-  setStatus("Fetched origin");
+  setStatus("Fetched remotes");
 }
 
 // quietly fetch in the background so pushes from elsewhere show up; the
@@ -5121,7 +4475,7 @@ function setToolbar(repo: RepoData | null) {
       ? "Resolve the conflict first"
       : detached
       ? "Pull unavailable — detached HEAD"
-      : `Pull origin/${br} into ${br} (fast-forward/merge)\ngit pull`
+      : `Pull the configured upstream into ${br}\ngit pull`
   );
   set(
     "push-btn",
@@ -5130,7 +4484,7 @@ function setToolbar(repo: RepoData | null) {
       ? "Resolve the conflict first"
       : detached
       ? "Push unavailable — detached HEAD"
-      : `Push the current branch to origin/${br}\ngit push -u origin ${br}`
+      : `Push ${br} to its configured remote (or choose a remote)`
   );
   set("branch-btn", conflict);
   set("stash-btn", conflict,
@@ -5175,6 +4529,17 @@ async function doCheckoutConfirm(t: Tab, target: string, upstream?: string) {
 // right-click on a repo (tab / path) -> open it externally
 function repoMenu(path: string): MenuItem[] {
   return [
+    {
+      label: "Manage remotes…",
+      action: () => showRemoteManager(path, async () => {
+        if (cur()?.repo.path === path) {
+          await reloadActive("Remote settings updated");
+          void syncRepoHost();
+          const t = cur();
+          if (t?.repo.path === path) void refreshRemoteTags(t);
+        }
+      }),
+    },
     {
       label: "Recover a commit (reflog)…",
       action: () => showRecovery(path, async () => {
@@ -5428,13 +4793,25 @@ async function doPull() {
   setStatus("pulling…");
   runAction(invoke("pull", { path: t.repo.path }), "Pulled", "pull-btn");
 }
+async function chooseRemote(path: string, title: string, alwaysChoose = false): Promise<string | null> {
+  const options = await invoke<{ names: string[]; preferred: string | null }>("remote_choices", { path });
+  if (!options.names.length) throw new Error("This repository has no remotes. Add a remote first.");
+  if (options.names.length === 1) return options.names[0];
+  if (!alwaysChoose && options.preferred) return options.preferred;
+  return choiceModal(title, "Choose the remote repository for this operation.",
+    options.names.map(name => ({ key: name, label: name })));
+}
+
 async function doPush() {
   const t = cur();
   if (!t) return;
-  setStatus("pushing…");
+  let remote: string | null = null;
   pushBusy("push-btn");
   try {
-    const msg = await invoke<string>("push", { path: t.repo.path });
+    remote = await chooseRemote(t.repo.path, "Push to remote");
+    if (!remote) return;
+    setStatus(`pushing to ${remote}…`);
+    const msg = await invoke<string>("push", { path: t.repo.path, remote });
     await reloadActive(msg);
   } catch (e) {
     setStatus("");
@@ -5442,24 +4819,21 @@ async function doPush() {
     if (m) {
       // git cannot tell "someone else pushed" apart from "I rewrote history"
       // (both are ahead=0, behind>0), so let the user say which one it is.
-      const br = m[1].trim();
+      const target = m[1].trim();
       const pick = await choiceModal(
-        `Push rejected — origin/${br} has commits you don't have`,
-        `Keep them:  pull origin's commits into your branch, then push.` +
-          `\n\n` +
-          `Discard them:  force-push, replacing origin/${br} with your version. ` +
-          `Choose this after a hard reset, rebase or amend — anything on origin ` +
-          `that you don't have is lost for everyone.`,
+        `Push rejected — ${target} has commits you don't have`,
+        `Fetch and inspect ${target} before merging or rebasing. ` +
+          `Pull uses your configured upstream, which may be a different remote.\n\n` +
+          `Force push replaces ${target} with your version. Remote commits you don't have may be lost.`,
         [
-          { key: "pull", label: "Pull (keep origin)" },
-          { key: "force", label: "Force push (overwrite origin)", danger: true },
+          { key: "fetch", label: "Fetch and inspect" },
+          { key: "force", label: `Force push to ${remote}`, danger: true },
         ]
       );
-      if (pick === "pull") {
-        await doPull();
-        setStatus("Pulled — press Push again");
-      } else if (pick === "force") {
-        await doForcePush();
+      if (pick === "fetch") {
+        await runAction(invoke("fetch", { path: t.repo.path }), "Fetched — inspect the remote branch");
+      } else if (pick === "force" && remote && cur() === t) {
+        await doForcePush(t.repo.path, remote);
       }
       return;
     }
@@ -5468,21 +4842,19 @@ async function doPush() {
     popBusy();
   }
 }
-// Force-push with --force-with-lease. Refuses if origin moved since our last
+// Force-push with --force-with-lease. Refuses if the remote moved since our last
 // fetch, so a rewrite can't quietly bury someone else's work.
-async function doForcePush() {
-  const t = cur();
-  if (!t) return;
+async function doForcePush(path: string, remote: string) {
   setStatus("force-pushing…");
   pushBusy("push-btn");
   try {
-    const msg = await invoke<string>("force_push", { path: t.repo.path });
+    const msg = await invoke<string>("force_push", { path, remote });
     await reloadActive(msg);
   } catch (e) {
     setStatus("");
     if (/STALE:/.test(String(e))) {
       errorModal(
-        "Force-push refused: origin has changed since your last fetch." +
+        `Force-push refused: ${remote} has changed since your last fetch.` +
           "\n\n" +
           "Someone pushed in the meantime, so overwriting now would destroy " +
           "their work. Fetch, look at what arrived, then decide."
@@ -5519,102 +4891,6 @@ async function doTerminal() {
   } catch (e) {
     errorModal("Open terminal failed:\n" + String(e));
   }
-}
-
-// ---- context menu ----
-interface MenuItem {
-  label?: string;
-  action?: () => void;
-  separator?: boolean;
-  checked?: boolean; // renders a tick column; undefined = plain item
-  keepOpen?: boolean; // toggles stay open so several can be flipped at once
-}
-function showMenu(x: number, y: number, items: MenuItem[]) {
-  closeMenu();
-  if (!items.length) return;
-  const menu = document.createElement("div");
-  menu.id = "ctxmenu";
-  items.forEach((it) => {
-    if (it.separator) {
-      const sep = document.createElement("div");
-      sep.className = "ctxsep";
-      menu.appendChild(sep);
-      return;
-    }
-    const row = document.createElement("div");
-    row.className = "ctxitem";
-    // a menu with any checkable item reserves a tick column so labels align
-    if (items.some((m) => m.checked !== undefined)) {
-      row.classList.add("checkable");
-      row.innerHTML =
-        `<span class="ctxtick">${it.checked ? "✓" : ""}</span>` +
-        `<span>${escapeHtml(it.label ?? "")}</span>`;
-    } else {
-      row.textContent = it.label ?? "";
-    }
-    row.addEventListener("click", (e) => {
-      if (it.keepOpen) {
-        e.stopPropagation();
-        it.action?.();
-        return;
-      }
-      closeMenu();
-      it.action?.();
-    });
-    menu.appendChild(row);
-  });
-  document.body.appendChild(menu);
-  // keep on-screen
-  const rect = menu.getBoundingClientRect();
-  const px = Math.min(x, window.innerWidth - rect.width - 4);
-  const py = Math.min(y, window.innerHeight - rect.height - 4);
-  menu.style.left = `${px}px`;
-  menu.style.top = `${Math.max(4, py)}px`;
-}
-function closeMenu() {
-  document.getElementById("ctxmenu")?.remove();
-}
-
-// ---- name prompt modal (returns entered text or null) ----
-function promptModal(
-  title: string,
-  placeholder = "",
-  initial = ""
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    overlay.innerHTML =
-      `<div class="modal">` +
-      `<div class="modal-title">${escapeHtml(title)}</div>` +
-      `<input class="modal-input" placeholder="${escapeHtml(placeholder)}" />` +
-      `<div class="modal-btns">` +
-      `<button class="modal-cancel">Cancel</button>` +
-      `<button class="modal-ok">OK</button>` +
-      `</div></div>`;
-    document.body.appendChild(overlay);
-    const input = overlay.querySelector(".modal-input") as HTMLInputElement;
-    input.value = initial;
-    input.focus();
-    input.select();
-    const done = (val: string | null) => {
-      overlay.remove();
-      resolve(val);
-    };
-    overlay.querySelector(".modal-ok")?.addEventListener("click", () =>
-      done(input.value.trim() || null)
-    );
-    overlay.querySelector(".modal-cancel")?.addEventListener("click", () =>
-      done(null)
-    );
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) done(null);
-    });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") done(input.value.trim() || null);
-      if (e.key === "Escape") done(null);
-    });
-  });
 }
 
 async function copyText(s: string) {
@@ -5675,83 +4951,6 @@ async function runAction(p: Promise<unknown>, okMsg: string, btnId?: string) {
   } finally {
     popBusy();
   }
-}
-
-function errorModal(msg: string) {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML =
-    `<div class="modal error-modal">` +
-    `<div class="error-head"><span class="error-bang">!</span><span>Something went wrong</span></div>` +
-    `<pre class="error-msg">${escapeHtml(msg)}</pre>` +
-    `<div class="modal-btns"><button class="modal-ok">OK</button></div>` +
-    `</div>`;
-  document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  const ok = overlay.querySelector(".modal-ok") as HTMLButtonElement | null;
-  ok?.addEventListener("click", close);
-  ok?.focus();
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-}
-
-// Modal with several named choices (returns the picked key, or null).
-// Used where "yes/no" would hide a real decision from the user.
-function choiceModal(
-  title: string,
-  body: string,
-  choices: { key: string; label: string; danger?: boolean }[]
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    overlay.innerHTML =
-      `<div class="modal choice-modal"><div class="modal-title">${escapeHtml(title)}</div>` +
-      `<div class="modal-body">${escapeHtml(body)}</div>` +
-      `<div class="modal-btns"><button class="modal-cancel">Cancel</button>` +
-      choices
-        .map(
-          (c) =>
-            `<button class="modal-ok${c.danger ? " danger" : ""}" data-key="${escapeHtml(c.key)}">` +
-            `${escapeHtml(c.label)}</button>`
-        )
-        .join("") +
-      `</div></div>`;
-    document.body.appendChild(overlay);
-    const done = (v: string | null) => {
-      overlay.remove();
-      resolve(v);
-    };
-    overlay.querySelectorAll<HTMLElement>(".modal-ok").forEach((b) =>
-      b.addEventListener("click", () => done(b.dataset.key ?? null))
-    );
-    overlay.querySelector(".modal-cancel")?.addEventListener("click", () => done(null));
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) done(null);
-    });
-  });
-}
-
-function confirmModal(title: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    overlay.innerHTML =
-      `<div class="modal"><div class="modal-title">${escapeHtml(title)}</div>` +
-      `<div class="modal-btns"><button class="modal-cancel">Cancel</button>` +
-      `<button class="modal-ok danger">Confirm</button></div></div>`;
-    document.body.appendChild(overlay);
-    const done = (v: boolean) => {
-      overlay.remove();
-      resolve(v);
-    };
-    overlay.querySelector(".modal-ok")?.addEventListener("click", () => done(true));
-    overlay.querySelector(".modal-cancel")?.addEventListener("click", () => done(false));
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) done(false);
-    });
-  });
 }
 
 // Delete a local branch. Safe delete first; if git refuses because the branch
@@ -5921,6 +5120,18 @@ function stashMenu(s: StashEntry, repo: RepoData): MenuItem[] {
   ];
 }
 
+async function remoteTagAction(path: string, name: string, remove: boolean) {
+  try {
+    const remote = await chooseRemote(path, remove ? "Delete tag on remote" : "Push tag to remote", true);
+    if (!remote) return;
+    if (remove && !await confirmModal(`Delete tag ${name} on ${remote}?`)) return;
+    await runAction(invoke(remove ? "delete_remote_tag" : "push_tag", { path, name, remote }),
+      `${remove ? "Deleted" : "Pushed"} tag ${name} ${remove ? "on" : "to"} ${remote}`);
+    const t = tabs.find(t => t.repo.path === path);
+    if (t) void refreshRemoteTags(t);
+  } catch (e) { errorModal(String(e)); }
+}
+
 function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
   const path = repo.path;
   const curBranch = repo.head_branch;
@@ -5934,17 +5145,12 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
 
   // tags get their own menu (push/delete to/from remote)
   if (isTag) {
-    const onRemote = (cur()?.remoteTags ?? new Set()).has(r.name);
     items.push({ label: `Checkout tag ${r.name}`, action: () => doCheckout(r.name) });
     items.push({ separator: true });
-    if (!onRemote) {
-      items.push({
-        label: `Push tag ${r.name} to origin`,
-        action: () => runAction(invoke("push_tag", { path, name: r.name }), `Pushed tag ${r.name}`),
-      });
-    } else {
-      items.push({ label: `✓ on origin` });
-    }
+    items.push({
+      label: `Push tag ${r.name} to remote…`,
+      action: () => remoteTagAction(path, r.name, false),
+    });
     items.push({
       label: `Delete tag ${r.name} (local)`,
       action: async () => {
@@ -5952,15 +5158,10 @@ function branchMenu(r: RefInfo, repo: RepoData): MenuItem[] {
           runAction(invoke("delete_tag", { path, name: r.name }), `Deleted tag ${r.name}`);
       },
     });
-    if (onRemote) {
-      items.push({
-        label: `Delete tag ${r.name} on origin`,
-        action: async () => {
-          if (await confirmModal(`Delete tag ${r.name} on origin?`))
-            runAction(invoke("delete_remote_tag", { path, name: r.name }), `Deleted ${r.name} on origin`);
-        },
-      });
-    }
+    items.push({
+      label: `Delete tag ${r.name} on remote…`,
+      action: () => remoteTagAction(path, r.name, true),
+    });
     items.push({ separator: true });
     items.push({ label: "Create branch here…", action: () => doCreateBranch(path, hash) });
     items.push({ label: "Copy tag name", action: () => copyText(r.name) });
@@ -6030,9 +5231,6 @@ function setStatus(s: string) {
 }
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-}
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function cssEsc(s: string): string {
   return s.replace(/["\\]/g, "\\$&");
@@ -6203,180 +5401,6 @@ function avatarUrl(key: string): string {
   avatarCache.set(key, url);
   return url;
 }
-// Wrap the [start,end) CHARACTER range of already-highlighted HTML in a marker
-// span, splitting across the syntax spans as needed. Lets the char-level diff
-// marks sit on top of syntax highlighting instead of replacing it.
-function markRange(html: string, start: number, end: number, cls: string): string {
-  if (start >= end) return html;
-  const holder = document.createElement("div");
-  holder.innerHTML = html;
-  const walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT);
-  const texts: Text[] = [];
-  let node: Node | null;
-  while ((node = walker.nextNode())) texts.push(node as Text);
-
-  let pos = 0;
-  for (const t of texts) {
-    const len = t.data.length; // capture BEFORE splitting
-    const s = Math.max(start, pos);
-    const e = Math.min(end, pos + len);
-    if (s < e) {
-      const localS = s - pos;
-      const localE = e - pos;
-      t.splitText(localE); // tail stays a sibling; t is now [0, localE)
-      const mid = t.splitText(localS); // mid is [localS, localE)
-      const span = document.createElement("span");
-      span.className = cls;
-      mid.replaceWith(span);
-      span.appendChild(mid);
-    }
-    pos += len;
-  }
-  return holder.innerHTML;
-}
-
-// char-level diff of two strings: syntax-highlight both, then mark the
-// differing middle (common prefix/suffix stripped).
-function intraline(
-  oldS: string,
-  newS: string,
-  lang: string | null = null,
-  oHtml?: string, // pre-highlighted (block-aware) HTML when the caller has it
-  nHtml?: string
-): { o: string; n: string } {
-  const min = Math.min(oldS.length, newS.length);
-  let p = 0;
-  while (p < min && oldS[p] === newS[p]) p++;
-  let s = 0;
-  while (
-    s < min - p &&
-    oldS[oldS.length - 1 - s] === newS[newS.length - 1 - s]
-  )
-    s++;
-  return {
-    o: markRange(oHtml ?? hlLine(oldS, lang), p, oldS.length - s, "chg"),
-    n: markRange(nHtml ?? hlLine(newS, lang), p, newS.length - s, "chg"),
-  };
-}
-
-// Parse a unified diff into rows with line numbers, per-line coloring, and
-// char-level highlighting on paired changed lines.
-function renderUnifiedDiff(diff: string): string {
-  const lines = diff.split("\n");
-  const lang = hlLang; // set by the view that opened the diff
-  // Pre-pass: rebuild each SIDE of the diff as its own document and
-  // highlight it in one go. Per-row highlighting breaks block comments and
-  // multi-line strings — continuation lines get coloured as plain code.
-  const oldTexts: string[] = [];
-  const newTexts: string[] = [];
-  const isMetaLine = (l: string) =>
-    l.startsWith("diff ") || l.startsWith("index ") || l.startsWith("+++") ||
-    l.startsWith("---") || l.startsWith("new file") ||
-    l.startsWith("deleted file") || l.startsWith("old mode") ||
-    l.startsWith("new mode") || l.startsWith("similarity") ||
-    l.startsWith("rename ") || l.startsWith("\\");
-  for (const l of lines) {
-    if (l === "" || l.startsWith("@@") || isMetaLine(l)) continue;
-    if (l.startsWith("+")) newTexts.push(l.slice(1));
-    else if (l.startsWith("-")) oldTexts.push(l.slice(1));
-    else {
-      oldTexts.push(l.slice(1));
-      newTexts.push(l.slice(1));
-    }
-  }
-  const oldHl = hlLines(oldTexts, lang);
-  const newHl = hlLines(newTexts, lang);
-  let oi = 0; // cursor into oldHl
-  let ni = 0; // cursor into newHl
-  let oldN = 0;
-  let newN = 0;
-  const rows: string[] = [];
-  // data-ln = the file line this row maps to (new side; old side for pure
-  // deletions) — used by "history of selected lines"
-  const row = (cls: string, ln1: string, ln2: string, codeHtml: string) => {
-    const ln = ln2 || ln1;
-    const attr = ln ? ` data-ln="${ln}"` : "";
-    return (
-      `<div class="dl ${cls}"${attr}><span class="ln">${ln1}</span>` +
-      `<span class="ln">${ln2}</span><span class="dc">${codeHtml}</span></div>`
-    );
-  };
-
-  // buffered consecutive removals/additions, flushed as a paired block.
-  // Paired lines keep the character-level change highlight (no syntax there);
-  // everything else gets syntax highlighting.
-  let dels: { text: string; ln: number; html: string }[] = [];
-  let adds: { text: string; ln: number; html: string }[] = [];
-  const flush = () => {
-    const pair = Math.min(dels.length, adds.length);
-    dels.forEach((d, i) =>
-      rows.push(
-        row(
-          "del",
-          String(d.ln),
-          "",
-          i < pair
-            ? intraline(d.text, adds[i].text, lang, d.html, adds[i].html).o
-            : d.html
-        )
-      )
-    );
-    adds.forEach((a, i) =>
-      rows.push(
-        row(
-          "add",
-          "",
-          String(a.ln),
-          i < pair
-            ? intraline(dels[i].text, a.text, lang, dels[i].html, a.html).n
-            : a.html
-        )
-      )
-    );
-    dels = [];
-    adds = [];
-  };
-
-  for (const line of lines) {
-    if (line === "") continue;
-    if (line.startsWith("@@")) {
-      flush();
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (m) {
-        oldN = +m[1];
-        newN = +m[2];
-      }
-      rows.push(row("hunk", "", "", escapeHtml(line)));
-    } else if (
-      line.startsWith("diff ") ||
-      line.startsWith("index ") ||
-      line.startsWith("+++") ||
-      line.startsWith("---") ||
-      line.startsWith("new file") ||
-      line.startsWith("deleted file") ||
-      line.startsWith("old mode") ||
-      line.startsWith("new mode") ||
-      line.startsWith("similarity") ||
-      line.startsWith("rename ") ||
-      line.startsWith("\\")
-    ) {
-      flush();
-      rows.push(row("meta", "", "", escapeHtml(line)));
-    } else if (line.startsWith("+")) {
-      adds.push({ text: line.slice(1), ln: newN++, html: newHl[ni++] ?? "" });
-    } else if (line.startsWith("-")) {
-      dels.push({ text: line.slice(1), ln: oldN++, html: oldHl[oi++] ?? "" });
-    } else {
-      flush();
-      const ctxHtml = newHl[ni++] ?? ""; // context exists on both sides
-      oi++;
-      rows.push(row("ctx", String(oldN++), String(newN++), ctxHtml));
-    }
-  }
-  flush();
-  return rows.join("");
-}
-
 window.addEventListener("DOMContentLoaded", () => {
   $("open-btn").addEventListener("click", openRepo);
   $("clone-btn").addEventListener("click", doClone);

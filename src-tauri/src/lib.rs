@@ -6,6 +6,8 @@ use std::path::Path;
 use std::process::Command;
 
 mod recovery;
+mod remotes;
+mod remote_manager;
 
 #[derive(Serialize)]
 pub struct Commit {
@@ -1532,35 +1534,10 @@ async fn fetch(path: String) -> Result<String, String> {
     Ok("fetched".to_string())
 }
 
-// push the CURRENT branch to origin (sets upstream). Fails on detached HEAD.
+// Push only the current branch, honoring its configured push remote/upstream.
 #[tauri::command]
-async fn push(path: String) -> Result<String, String> {
-    let branch = git(&path, &["symbolic-ref", "--short", "HEAD"])
-        .map_err(|_| "cannot push: detached HEAD".to_string())?;
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return Err("cannot push: detached HEAD".to_string());
-    }
-    // --porcelain puts a machine-readable status on STDOUT ("[up to date]",
-    // "[rejected] (fetch first)", "old..new"), so we can tell "nothing to do"
-    // apart from a real failure instead of surfacing git's prose + hints.
-    match git(&path, &["push", "--porcelain", "-u", "origin", branch]) {
-        Ok(out) => {
-            if out.contains("[up to date]") {
-                Ok(format!("Nothing to push — {branch} matches origin"))
-            } else {
-                Ok(format!("Pushed {branch} to origin"))
-            }
-        }
-        Err(e) => {
-            // rejected: origin moved on. Pulling is the fix, not a scary dump.
-            if e.contains("[rejected]") || e.contains("fetch first") {
-                Err(format!("BEHIND:{branch}"))
-            } else {
-                Err(e)
-            }
-        }
-    }
+async fn push(path: String, remote: Option<String>) -> Result<String, String> {
+    remotes::push_current(&path, remote.as_deref(), false)
 }
 
 // Force-push the current branch with --force-with-lease: overwrites the remote
@@ -1568,26 +1545,8 @@ async fn push(path: String) -> Result<String, String> {
 // deliberate rewrite (hard reset, rebase, amend) goes through, while a
 // teammate's newer push is never silently destroyed.
 #[tauri::command]
-async fn force_push(path: String) -> Result<String, String> {
-    let branch = git(&path, &["symbolic-ref", "--short", "HEAD"])
-        .map_err(|_| "cannot push: detached HEAD".to_string())?;
-    let branch = branch.trim().to_string();
-    if branch.is_empty() {
-        return Err("cannot push: detached HEAD".to_string());
-    }
-    match git(
-        &path,
-        &["push", "--porcelain", "--force-with-lease", "-u", "origin", &branch],
-    ) {
-        Ok(_) => Ok(format!("Force-pushed {branch} to origin")),
-        Err(e) => {
-            if e.contains("stale info") || e.contains("[rejected]") {
-                Err(format!("STALE:{branch}"))
-            } else {
-                Err(e)
-            }
-        }
-    }
+async fn force_push(path: String, remote: Option<String>) -> Result<String, String> {
+    remotes::push_current(&path, remote.as_deref(), true)
 }
 
 #[tauri::command]
@@ -1842,10 +1801,11 @@ async fn create_tag(path: String, name: String, hash: String) -> Result<(), Stri
     git(&path, &["tag", &name, &hash]).map(|_| ())
 }
 
-// names of tags that exist on origin (hits the network; may be empty offline)
+// Names of tags on the selected/configured remote (network access).
 #[tauri::command]
-async fn remote_tags(path: String) -> Result<Vec<String>, String> {
-    let raw = git(&path, &["ls-remote", "--tags", "origin"])?;
+async fn remote_tags(path: String, remote: Option<String>) -> Result<Vec<String>, String> {
+    let remote = remotes::select(&path, remote.as_deref())?;
+    let raw = git(&path, &["ls-remote", "--tags", &remote])?;
     let mut set = std::collections::BTreeSet::new();
     for line in raw.lines() {
         if let Some(idx) = line.find("refs/tags/") {
@@ -1859,9 +1819,11 @@ async fn remote_tags(path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn push_tag(path: String, name: String) -> Result<String, String> {
-    git(&path, &["push", "origin", &name])?;
-    Ok(format!("Pushed tag {name}"))
+async fn push_tag(path: String, name: String, remote: Option<String>) -> Result<String, String> {
+    let remote = remotes::select(&path, remote.as_deref())?;
+    let tag = format!("refs/tags/{name}");
+    git(&path, &["push", "--", &remote, &format!("{tag}:{tag}")])?;
+    Ok(format!("Pushed tag {name} to {remote}"))
 }
 
 // Delete a local branch. Plain `-d` refuses when the branch still holds
@@ -1913,8 +1875,9 @@ async fn delete_tag(path: String, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn delete_remote_tag(path: String, name: String) -> Result<(), String> {
-    git(&path, &["push", "origin", "--delete", &format!("refs/tags/{name}")]).map(|_| ())
+async fn delete_remote_tag(path: String, name: String, remote: Option<String>) -> Result<(), String> {
+    let remote = remotes::select(&path, remote.as_deref())?;
+    git(&path, &["push", "--delete", "--", &remote, &format!("refs/tags/{name}")]).map(|_| ())
 }
 
 #[tauri::command]
@@ -2233,6 +2196,10 @@ pub fn run() {
             diff_commit_worktree,
             push,
             force_push,
+            remotes::remote_choices,
+            remote_manager::remote_settings,
+            remote_manager::remote_manage,
+            remote_manager::branch_remote_setting,
             pull,
             stash_push,
             stash_pop,

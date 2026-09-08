@@ -8,6 +8,7 @@ interface ReflogEntry {
   actor: string;
 }
 interface ReflogPage { entries: ReflogEntry[]; has_more: boolean }
+interface ChangedFile { status: string; path: string }
 
 export function showRecovery(path: string, onRecovered: () => Promise<void>) {
   if (document.getElementById("recovery-dialog")) return;
@@ -28,6 +29,14 @@ export function showRecovery(path: string, onRecovered: () => Promise<void>) {
     <div class="recovery-list" role="group" aria-label="Reflog entries"></div>
     <div class="recovery-pagination"><span class="recovery-count"></span>
       <button type="button" class="recovery-more">Load more</button></div>
+    <section class="recovery-preview" aria-labelledby="recovery-preview-title">
+      <h3 id="recovery-preview-title">Commit changes</h3>
+      <p class="recovery-preview-info">Select a history entry to preview its changes.</p>
+      <label>Changed file <select class="recovery-files" disabled aria-label="Changed file"></select></label>
+      <p class="recovery-preview-status" role="status" aria-live="polite"></p>
+      <button type="button" class="recovery-preview-retry" hidden>Retry preview</button>
+      <pre class="recovery-diff" tabindex="0" aria-label="Selected file diff"></pre>
+    </section>
     <form class="recovery-form">
       <label>New branch name <input class="recovery-name" placeholder="recovered/my-work" required /></label>
       <button type="submit" class="recovery-create" disabled>Recover branch</button>
@@ -41,12 +50,81 @@ export function showRecovery(path: string, onRecovered: () => Promise<void>) {
   const more = get<HTMLButtonElement>(".recovery-more");
   const status = get(".recovery-status");
   const list = get(".recovery-list");
+  const files = get<HTMLSelectElement>(".recovery-files");
+  const previewStatus = get(".recovery-preview-status");
+  const diff = get(".recovery-diff");
+  const retry = get<HTMLButtonElement>(".recovery-preview-retry");
   get(".recovery-path").textContent = path;
   const entries: ReflogEntry[] = [];
   let selected: ReflogEntry | null = null;
   let loading = false;
   let saving = false;
   let hasMore = true;
+  let previewRequest = 0;
+  const showFile = async () => {
+    if (!selected || files.selectedIndex < 0) return;
+    const request = ++previewRequest;
+    const hash = selected.hash;
+    const file = files.value;
+    diff.replaceChildren();
+    retry.hidden = true;
+    previewStatus.textContent = "Loading file changes…";
+    try {
+      const patch = await invoke<string>("commit_diff", { path, hash, file, full: false });
+      if (!dialog.isConnected || request !== previewRequest) return;
+      const lines = patch.split("\n");
+      const limit = 3000;
+      const fragment = document.createDocumentFragment();
+      for (const line of lines.slice(0, limit)) {
+        const span = document.createElement("span");
+        span.className = line.startsWith("@@") ? "diff-hunk" :
+          line.startsWith("+") && !line.startsWith("+++") ? "diff-added" :
+          line.startsWith("-") && !line.startsWith("---") ? "diff-removed" : "diff-context";
+        span.textContent = line || " ";
+        fragment.append(span);
+      }
+      diff.replaceChildren(fragment);
+      diff.scrollTop = diff.scrollLeft = 0;
+      previewStatus.textContent = !patch.trim() ? "No text diff for this file." :
+        lines.length > limit ? "Preview limited to the first 3,000 lines." :
+        "Additions are green; deletions are red. Binary changes appear as a notice.";
+    } catch (e) {
+      if (!dialog.isConnected || request !== previewRequest) return;
+      previewStatus.textContent = `Could not load diff: ${String(e)}`;
+      retry.hidden = false;
+    }
+  };
+  const preview = async (entry: ReflogEntry) => {
+    const request = ++previewRequest;
+    files.replaceChildren();
+    files.disabled = true;
+    diff.replaceChildren();
+    retry.hidden = true;
+    get(".recovery-preview-info").textContent = `${entry.hash} — changes against its first parent (or an empty tree for the first commit).`;
+    previewStatus.textContent = "Loading changed files…";
+    try {
+      const changed = await invoke<ChangedFile[]>("commit_files", { path, hash: entry.hash });
+      if (!dialog.isConnected || request !== previewRequest) return;
+      for (const file of changed) {
+        const option = document.createElement("option");
+        option.value = file.path;
+        option.textContent = `${file.status}  ${file.path}`;
+        files.append(option);
+      }
+      files.disabled = !changed.length;
+      if (changed.length) await showFile();
+      else previewStatus.textContent = "This commit has no file changes against its first parent.";
+    } catch (e) {
+      if (!dialog.isConnected || request !== previewRequest) return;
+      previewStatus.textContent = `Could not load changed files: ${String(e)}`;
+      retry.hidden = false;
+    }
+  };
+  files.addEventListener("change", () => void showFile());
+  retry.addEventListener("click", () => {
+    if (files.options.length) void showFile();
+    else if (selected) void preview(selected);
+  });
   const update = () => {
     create.disabled = saving || !selected || !name.value.trim();
     more.disabled = saving || loading;
@@ -74,6 +152,7 @@ export function showRecovery(path: string, onRecovered: () => Promise<void>) {
         if (!name.value) name.value = `recovered/${entry.hash.slice(0, 12)}`;
         status.textContent = `Selected ${entry.hash}`;
         update();
+        void preview(entry);
       });
       const body = document.createElement("span");
       const action = document.createElement("strong");
@@ -138,6 +217,7 @@ export function showRecovery(path: string, onRecovered: () => Promise<void>) {
   dialog.addEventListener("cancel", e => { if (saving) e.preventDefault(); });
   dialog.addEventListener("keydown", e => e.stopPropagation());
   dialog.addEventListener("close", () => {
+    previewRequest++;
     dialog.remove();
     if (previousFocus?.isConnected) previousFocus.focus();
   });
