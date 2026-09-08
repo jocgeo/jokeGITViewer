@@ -74,6 +74,10 @@ bundled libgit2, no heavy runtime. Small binary, native window.
   from the same panel
 
 ### Toolbar & actions
+- **Recovery**: right-click a repository tab or its path → **Recover a commit (reflog)…**.
+   Browse local reflog entries, filter the loaded history, and recover a commit into
+   a new branch without switching branches or changing staged/unstaged work.
+   Recovery requires the commit to still exist locally; expired reflog history is unavailable.
 - **Fetch · Pull · Push** (current branch only) **· Branch · Stash · Terminal · Search**
 - Hover any button for the exact `git` command it runs; buttons grey out with a
   spinner while an action runs

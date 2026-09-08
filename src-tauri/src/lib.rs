@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
+mod recovery;
+
 #[derive(Serialize)]
 pub struct Commit {
     hash: String,
@@ -747,12 +749,22 @@ async fn resolve_write(path: String, file: String, content: String) -> Result<()
 
 #[tauri::command]
 async fn merge_abort(path: String, kind: String) -> Result<(), String> {
-    // conflicted file-level cherry-pick: no operation to abort — restore the
-    // conflicted files to their pre-pick state (they were clean, 3way requires it)
+    // Three-way apply stores the pre-apply index in stage 2. It may contain
+    // staged work that differs from HEAD, so restore ours, never HEAD.
     if kind == "apply" {
-        let files = git(&path, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-        for f in files.lines().filter(|l| !l.trim().is_empty()) {
-            let _ = git(&path, &["checkout", "HEAD", "--", f]);
+        let files = git(&path, &["diff", "--name-only", "-z", "--diff-filter=U"])?;
+        for file in files.split('\0').filter(|f| !f.is_empty()) {
+            let stages = git(&path, &["ls-files", "--unmerged", "-z", "--", file])?;
+            let has_ours = stages.split('\0').any(|entry| {
+                entry.split_once('\t').map(|(meta, _)| meta.ends_with(" 2")).unwrap_or(false)
+            });
+            if has_ours {
+                git(&path, &["checkout", "--ours", "--", file])?;
+                git(&path, &["add", "--", file])?;
+            } else {
+                // No stage 2 means the file did not exist on our side.
+                git(&path, &["rm", "--force", "--", file])?;
+            }
         }
         return Ok(());
     }
@@ -1632,9 +1644,33 @@ async fn open_terminal(path: String) -> Result<(), String> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW for the launcher
         cmd.spawn().map_err(|e| e.to_string())?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = path;
+        let output = Command::new("open")
+            .args(["-a", "Terminal", &path])
+            .output()
+            .map_err(|e| format!("failed to launch Terminal: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("failed to launch Terminal: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let candidates: [(&str, Vec<&str>); 5] = [
+            ("gnome-terminal", vec!["--working-directory", &path]),
+            ("konsole", vec!["--workdir", &path]),
+            ("xfce4-terminal", vec!["--working-directory", &path]),
+            ("x-terminal-emulator", vec![]),
+            ("xterm", vec![]),
+        ];
+        for (program, args) in candidates {
+            match Command::new(program).args(args).current_dir(&path).spawn() {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("failed to launch {program}: {e}")),
+            }
+        }
+        return Err("No supported terminal found (gnome-terminal, konsole, xfce4-terminal, x-terminal-emulator, or xterm)".to_string());
     }
     Ok(())
 }
@@ -2151,6 +2187,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            recovery::reflog,
+            recovery::recover_branch,
             open_repo,
             commit_files,
             commit_diff,

@@ -1,0 +1,30 @@
+#recovery-dialog {
+  width: min(860px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  color: #e5e5ef;
+  background: #232334;
+  border: 1px solid #555568;
+  border-radius: 10px;
+  padding: 22px;
+}
+#recovery-dialog::backdrop { background: #0009; }
+#recovery-dialog .recovery-heading,
+#recovery-dialog .recovery-pagination,
+#recovery-dialog .recovery-form { display: flex; align-items: center; gap: 16px; justify-content: space-between; }
+#recovery-dialog h2 { margin: 0; font-size: 20px; }
+#recovery-dialog p { margin: 12px 0; line-height: 1.5; }
+#recovery-dialog .recovery-path { color: #b4b4cb; overflow-wrap: anywhere; }
+#recovery-dialog input:not([type="radio"]) { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; padding: 9px; }
+#recovery-dialog button { padding: 8px 12px; cursor: pointer; }
+#recovery-dialog button:disabled { cursor: default; opacity: .5; }
+#recovery-dialog .recovery-list { margin: 16px 0; max-height: 42vh; overflow: auto; border: 1px solid #45455b; border-radius: 6px; }
+#recovery-dialog .recovery-entry { display: flex; align-items: flex-start; gap: 12px; padding: 10px; border-bottom: 1px solid #39394d; cursor: pointer; }
+#recovery-dialog .recovery-entry:last-child { border-bottom: none; }
+#recovery-dialog .recovery-entry:has(input:checked) { background: #343e5e; }
+#recovery-dialog .recovery-entry strong { display: block; overflow-wrap: anywhere; font-weight: 500; }
+#recovery-dialog .recovery-meta { display: block; margin-top: 4px; font-size: 12px; color: #b4b4cb; overflow-wrap: anywhere; }
+#recovery-dialog .recovery-form { margin-top: 16px; align-items: flex-end; }
+#recovery-dialog .recovery-form label { flex: 1; }
+#recovery-dialog .recovery-status { overflow-wrap: anywhere; min-height: 1.5em; }
+#recovery-dialog small { color: #b4b4cb; }

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { showRecovery } from "./recovery";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
@@ -4065,6 +4066,7 @@ function buildLinePatch(
   let newCnt = 0;
   let hasSel = false;
   let done: string | null = null;
+  let keptPreviousLine = false;
 
   const finishHunk = (): string | null => {
     if (!hasSel || !cur.length) return null;
@@ -4097,13 +4099,20 @@ function buildLinePatch(
       oldCnt = 0;
       newCnt = 0;
       hasSel = false;
+      keptPreviousLine = false;
       continue;
     }
     if (!minus || done) continue; // header noise / already built
-    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (line.startsWith("\\")) {
+      // This marker belongs to the preceding source line. Carry it only
+      // when that line survived selection (including converted context).
+      if (keptPreviousLine) cur.push(line);
+      continue;
+    }
     if (line.startsWith("+")) {
       const isSel = sel.kind === "add" && newN === sel.ln;
       newN++;
+      keptPreviousLine = isSel || forUnstage;
       if (isSel) {
         cur.push(line);
         newCnt++;
@@ -4118,6 +4127,7 @@ function buildLinePatch(
     if (line.startsWith("-")) {
       const isSel = sel.kind === "del" && oldN === sel.ln;
       oldN++;
+      keptPreviousLine = isSel || !forUnstage;
       if (isSel) {
         cur.push(line);
         oldCnt++;
@@ -4129,6 +4139,7 @@ function buildLinePatch(
       } // else: dropped — never made it into the index
       continue;
     }
+    keptPreviousLine = true;
     cur.push(line); // plain context
     oldCnt++;
     newCnt++;
@@ -4955,10 +4966,13 @@ async function reloadGraphOnly() {
     const repo = await invoke<RepoData>("open_repo", { path: t.repo.path });
     t.repo = repo;
     t.nodes = buildNodes(repo, t.hidden);
-    renderSidebar(t);
-    renderGraph(t);
     saveRepoCache(t.repo.path, repo);
     t.fingerprint = repo.fingerprint; // included in open_repo — no extra call
+    // The response belongs to the captured tab, which may now be inactive.
+    if (cur() === t) {
+      renderSidebar(t);
+      renderGraph(t);
+    }
   } catch (e) {
     console.warn("graph reload failed", String(e));
   }
@@ -5161,6 +5175,13 @@ async function doCheckoutConfirm(t: Tab, target: string, upstream?: string) {
 // right-click on a repo (tab / path) -> open it externally
 function repoMenu(path: string): MenuItem[] {
   return [
+    {
+      label: "Recover a commit (reflog)…",
+      action: () => showRecovery(path, async () => {
+        if (cur()?.repo.path === path) await reloadActive();
+      }),
+    },
+    { separator: true },
     {
       label: "Open in File Explorer",
       action: () => invoke("open_in_explorer", { path }).catch((e) => errorModal(String(e))),
