@@ -666,7 +666,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 
 /* Graph pane = column headers + scrollable 3-column grid */
 #graphpane {
-  --lane-fade: 72px; /* how far the connector bleeds into the message column */
+  --lane-fade: 120px; /* how far the connector bleeds into the message column */
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -820,7 +820,19 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   display: flex;
   align-items: center;
   cursor: pointer;
-  border-bottom: 2px solid rgba(255,255,255,0.10);
+  /* No rule between commits. Instead the row reserves a transparent strip on
+     each side that nothing paints into, so the dark ground shows through as a
+     gap. Splitting it top AND bottom (rather than bottom only) keeps the
+     colour block centred on the row, which is what puts it on the same
+     centreline as the graph dot at rowY() = ROW_H / 2.
+       gap between two rows = 2 * --row-inset
+     Everything else follows for free: the connector pieces are positioned
+     against the PADDING box, and background-clip keeps the hover/selected
+     fills inside it too. Widen the gap by raising --row-inset alone. */
+  --row-inset: 3px;
+  border-top: var(--row-inset) solid transparent;
+  border-bottom: var(--row-inset) solid transparent;
+  background-clip: padding-box;
   contain: layout style paint;
 }
 /* The branch colour is a CONNECTOR, not a row-wide wash: it runs from the
@@ -894,8 +906,11 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
    item honours it while staying static, so .agomark keeps positioning against
    the whole row instead of against the message column. */
 .crow > div { z-index: 1; }
-.crow:hover { background: var(--bg2); }
-.crow.selected { background: var(--sel); }
+/* background-COLOR, not the `background` shorthand: the shorthand would reset
+   background-clip back to border-box and let these fills paint into the 2px
+   gap strip at the bottom of the row */
+.crow:hover { background-color: var(--bg2); }
+.crow.selected { background-color: var(--sel); }
 /* the checked-out branch: its rows carry a left marker so the current branch
    is findable without clicking anything */
 .crow.on-head { box-shadow: inset 3px 0 0 0 var(--accent); }
