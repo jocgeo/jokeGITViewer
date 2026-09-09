@@ -232,7 +232,8 @@ function tipGlyph(refs: RefInfo[]): string | null {
   return null;
 }
 
-// branch colour as a translucent row tint (see .crow --lane-bg)
+// branch colour as a translucent tint for the symbol->text connector
+// (see .crow::before)
 function laneTint(hex: string, alpha: number): string {
   const h = hex.replace("#", "");
   const r = parseInt(h.slice(0, 2), 16);
@@ -1183,6 +1184,7 @@ interface GCtx {
   placed: Placed[];
   byId: Map<string, Placed>;
   refsByHash: Map<string, RefInfo[]>;
+  graphLeft: number;  // x where the graph column starts (in #scroll content)
   graphViewW: number; // visible width of the graph column
   graphFullW: number; // width all lanes would need
   headChain: Set<string>;   // the checked-out branch (first-parent from HEAD)
@@ -1210,6 +1212,8 @@ function setGraphPan(x: number) {
       "viewBox",
       `${graphPanX} 0 ${gctx.graphViewW} ${gctx.placed.length * ROW_H}`
     );
+    // rows are untouched: the connectors follow this variable in CSS
+    $("graphpane").style.setProperty("--graph-pan", `${graphPanX}px`);
   }
   updateGraphHBar();
 }
@@ -1233,9 +1237,13 @@ function setupGraphPan() {
     "wheel",
     (e) => {
       if (!gctx || graphPanMax() <= 0) return;
+      // no visible lanes to pan
+      if ($("graphpane").classList.contains("hide-graph")) return;
       const rect = $("scroll").getBoundingClientRect();
-      const overGraph = e.clientX - rect.left + $("scroll").scrollLeft < gctx.graphViewW;
-      if (!overGraph) return;
+      // x in #scroll's CONTENT space — the same origin graphLeft is measured
+      // from, so the branch/tag columns ahead of the graph are excluded
+      const x = e.clientX - rect.left + $("scroll").scrollLeft;
+      if (x < gctx.graphLeft || x >= gctx.graphLeft + gctx.graphViewW) return;
       const dx = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
       if (dx === 0) return;
       e.preventDefault();
@@ -1360,7 +1368,11 @@ function renderGraph(t: Tab) {
   // configured widths: hidden columns (gear menu) render at 0 and a dragged
   // width may not have been applied yet, both of which shifted the whole SVG
   // out over the message column.
-  svg.style.left = `${graphColumnLeft()}px`;
+  const graphLeft = graphColumnLeft();
+  svg.style.left = `${graphLeft}px`;
+  // the row connectors are positioned in CSS off these two (see .crow::before)
+  pane.style.setProperty("--graph-left", `${graphLeft}px`);
+  pane.style.setProperty("--graph-pan", `${graphPanX}px`);
   (document.querySelector(".ch-graph") as HTMLElement).style.width = `${graphViewW}px`;
   $("rows").style.height = `${totalH}px`;
 
@@ -1376,7 +1388,7 @@ function renderGraph(t: Tab) {
   $("graph-content").style.minWidth = `${contentW}px`;
   $("col-headers").style.minWidth = `${contentW}px`;
 
-  gctx = { tab: t, placed, byId, refsByHash, graphViewW, graphFullW, headChain, forks, localReach };
+  gctx = { tab: t, placed, byId, refsByHash, graphLeft, graphViewW, graphFullW, headChain, forks, localReach };
   updateGraphHBar();
   // a repo with no commits is valid, just empty — say so instead of a blank pane
   if (!placed.length) {
@@ -1619,14 +1631,25 @@ function paintViewport() {
     row.className = "crow";
     row.dataset.id = n.id;
     row.style.top = `${p.row * ROW_H}px`;
-    // faint wash of the branch's colour so each lane is readable across the
-    // whole row, not just at the dot — stronger on the checked-out branch
+    // the branch's colour only bridges the dot and its message (plus the
+    // badge -> dot leader), so it reads as a link instead of a row highlight.
+    // Set inline, so a dimmed row has to be cleared here too — an inline
+    // custom property beats anything .crow.dim could say in the stylesheet.
     const onHeadRow = headChain.has(n.id);
-    row.style.setProperty("--lane-bg", laneTint(p.color, onHeadRow ? 0.2 : 0.08));
+    const dimRow = !n.worktree && levelOf(n.id) === 0;
+    row.style.setProperty("--node-x", `${laneX(p.lane)}px`);
+    row.style.setProperty(
+      "--lane-bg",
+      dimRow ? "transparent" : laneTint(p.color, onHeadRow ? 0.18 : 0.1)
+    );
+    row.style.setProperty(
+      "--lane-line",
+      dimRow ? "transparent" : laneTint(p.color, onHeadRow ? 0.85 : 0.55)
+    );
     if (onHeadRow) row.classList.add("on-head");
     if (n.kind === "commit" && !localReach.has(n.id)) row.classList.add("remote-only");
     if (n.id === t.selected) row.classList.add("selected");
-    if (!n.worktree && levelOf(n.id) === 0) row.classList.add("dim");
+    if (dimRow) row.classList.add("dim");
 
     let branchHtml = "";
     let tagHtml = "";
@@ -1689,6 +1712,10 @@ function paintViewport() {
         msgHtml += `<span class="agomark">${escapeHtml(label)}</span>`;
       }
     }
+    // a leader line needs a badge to lead from: without refs the connector
+    // starts at the dot and nothing runs into it from the left
+    if (branchHtml) row.classList.add("has-branch");
+    if (branchHtml || tagHtml) row.classList.add("has-refs");
     // branches and tags in their own columns, then the graph, then the message
     row.innerHTML =
       `<div class="col-branch">${branchHtml}</div>` +

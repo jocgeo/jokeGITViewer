@@ -666,6 +666,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 
 /* Graph pane = column headers + scrollable 3-column grid */
 #graphpane {
+  --msg-pad: 12px;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -822,10 +823,62 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-bottom: 2px solid rgba(255,255,255,0.10);
   contain: layout style paint;
 }
-/* each row carries a faint wash of its branch colour (--lane-bg, set per row
-   in JS) so a lane stays identifiable all the way across the message column.
-   Hover and selection are more specific, so they still win. */
-.crow { background: var(--lane-bg, transparent); }
+/* The branch colour is a CONNECTOR, not a row-wide wash: it runs from the
+   commit's symbol in the graph to the start of its message and stops there,
+   so the tint says "this dot belongs to this text" and nothing else.
+     --node-x   (per row)     the dot's x inside the graph column
+     --graph-left/--graph-pan (on #graphpane) where the column starts and how
+                              far the lanes are panned sideways
+   Keeping the pan in CSS means a sideways graph scroll moves every connector
+   without re-rendering a single row. */
+.crow::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* the dot's offset inside the column, clamped to the visible lane strip */
+  --off: clamp(0px, calc(var(--node-x, 0px) - var(--graph-pan, 0px)), var(--graph-w, 200px));
+  left: calc(var(--graph-left, 0px) + var(--off));
+  width: calc(var(--graph-w, 200px) + var(--msg-pad, 12px) - var(--off));
+  background: var(--lane-bg, transparent);
+  /* the connector arrives at the text with a solid cap in the lane colour */
+  border-right: 3px solid var(--lane-line, transparent);
+}
+/* leader line the other way: from the last ref badge to the symbol, so a
+   branch/tag pill and its dot read as one thing. The badge columns fill their
+   leftover space with it; this piece covers the graph column up to the dot. */
+.crow.has-refs::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  z-index: 0;
+  pointer-events: none;
+  left: var(--graph-left, 0px);
+  width: clamp(0px, calc(var(--node-x, 0px) - var(--graph-pan, 0px)), var(--graph-w, 200px));
+  background: var(--lane-line, transparent);
+}
+.crow.has-branch .col-branch::after,
+.crow.has-refs .col-tag::after {
+  content: "";
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 2px;
+  background: var(--lane-line, transparent);
+}
+/* no graph column, no symbol to connect to (and no leader lines either) */
+#graphpane.hide-graph .crow::before,
+#graphpane.hide-graph .crow::after,
+#graphpane.hide-graph .col-branch::after,
+#graphpane.hide-graph .col-tag::after,
+#graphpane.hide-refs.hide-tags .crow::after { display: none; }
+/* the columns paint over the connector, never under it. z-index alone: a flex
+   item honours it while staying static, so .agomark keeps positioning against
+   the whole row instead of against the message column. */
+.crow > div { z-index: 1; }
 .crow:hover { background: var(--bg2); }
 .crow.selected { background: var(--sel); }
 /* the checked-out branch: its rows carry a left marker so the current branch
@@ -835,10 +888,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* commits that live in no LOCAL branch (remote-only work) read as provisional */
 .crow.remote-only .col-msg .summary { font-style: italic; opacity: 0.82; }
 /* two levels only: in the selected history, or clearly not. Rows outside it
-   lose their lane tint as well, so the highlighted history is the only thing
-   with colour on it. */
+   lose their connector as well, so the highlighted history is the only thing
+   with colour on it — cleared in paintViewport, since --lane-bg/--lane-line
+   are set inline and no rule here could override that. */
 .crow.dim .col-msg { opacity: .32; }
-.crow.dim { --lane-bg: transparent; }
 .crow.dim.on-head { box-shadow: none; }
 .crow.dim.on-head .col-msg .summary { font-weight: 400; }
 
@@ -850,10 +903,13 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
   overflow: hidden;
   border-right: 1px solid rgba(255, 255, 255, 0.05);
 }
+/* the inset lives on the first pill instead of the column, so the leader line
+   can run all the way to the column's right edge with no gap */
+.col-branch > .badge:first-child,
+.col-tag > .badge:first-child { margin-left: 8px; }
 .col-branch { width: var(--branch-w, 170px); }
 .col-tag { width: var(--tag-w, 110px); }
 .col-graph {
@@ -867,7 +923,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   min-width: 0;
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 var(--msg-pad, 12px);
 }
 /* hierarchy: the message is the content, everything else is metadata */
 .col-msg .summary {
