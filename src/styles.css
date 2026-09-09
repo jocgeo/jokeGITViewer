@@ -666,7 +666,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 
 /* Graph pane = column headers + scrollable 3-column grid */
 #graphpane {
-  --msg-pad: 12px;
+  --lane-fade: 72px; /* how far the connector bleeds into the message column */
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -824,42 +824,57 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   contain: layout style paint;
 }
 /* The branch colour is a CONNECTOR, not a row-wide wash: it runs from the
-   commit's symbol in the graph to the start of its message and stops there,
-   so the tint says "this dot belongs to this text" and nothing else.
+   commit's symbol to the Graph/Commit-message boundary, marks that boundary
+   with a bold cap, then bleeds a short way into the message column and fades
+   out. So the tint says "this dot belongs to this text" without the cap ever
+   landing on the first letter.
      --node-x   (per row)     the dot's x inside the graph column
      --graph-left/--graph-pan (on #graphpane) where the column starts and how
                               far the lanes are panned sideways
    Keeping the pan in CSS means a sideways graph scroll moves every connector
    without re-rendering a single row. */
-.crow::before {
+.crow::before,
+.crow::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
   z-index: 0;
   pointer-events: none;
-  /* the dot's offset inside the column, clamped to the visible lane strip */
+}
+/* the wash: dot -> column boundary. The dot's offset inside the column is
+   clamped to the visible lane strip, so a lane panned out of view collapses
+   this to nothing instead of escaping the column. */
+.crow::before {
   --off: clamp(0px, calc(var(--node-x, 0px) - var(--graph-pan, 0px)), var(--graph-w, 200px));
   left: calc(var(--graph-left, 0px) + var(--off));
-  width: calc(var(--graph-w, 200px) + var(--msg-pad, 12px) - var(--off));
+  width: calc(var(--graph-w, 200px) - var(--off));
   background: var(--lane-bg, transparent);
-  /* the connector arrives at the text with a solid cap in the lane colour */
-  border-right: 3px solid var(--lane-line, transparent);
+}
+/* the bold cap sits ON the boundary, then the colour bleeds into the message
+   column and fades out. It fades to --lane-bg0 (the same hue at zero alpha)
+   rather than `transparent`, which would interpolate through grey. Anchored to
+   the boundary, not to the band, so the cap holds its place even when the band
+   above has collapsed. */
+.crow::after {
+  left: calc(var(--graph-left, 0px) + var(--graph-w, 200px));
+  width: var(--lane-fade, 72px);
+  border-left: 3px solid var(--lane-line, transparent);
+  background: linear-gradient(to right, var(--lane-bg, transparent), var(--lane-bg0, transparent));
 }
 /* leader line the other way: from the last ref badge to the symbol, so a
    branch/tag pill and its dot read as one thing. The badge columns fill their
    leftover space with it; this piece covers the graph column up to the dot. */
-.crow.has-refs::after {
+.crow.has-refs .col-graph::before {
   content: "";
   position: absolute;
   top: 50%;
   height: 2px;
   margin-top: -1px;
-  z-index: 0;
-  pointer-events: none;
-  left: var(--graph-left, 0px);
+  left: 0;
   width: clamp(0px, calc(var(--node-x, 0px) - var(--graph-pan, 0px)), var(--graph-w, 200px));
   background: var(--lane-line, transparent);
+  pointer-events: none;
 }
 .crow.has-branch .col-branch::after,
 .crow.has-refs .col-tag::after {
@@ -874,7 +889,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #graphpane.hide-graph .crow::after,
 #graphpane.hide-graph .col-branch::after,
 #graphpane.hide-graph .col-tag::after,
-#graphpane.hide-refs.hide-tags .crow::after { display: none; }
+#graphpane.hide-refs.hide-tags .col-graph::before { display: none; }
 /* the columns paint over the connector, never under it. z-index alone: a flex
    item honours it while staying static, so .agomark keeps positioning against
    the whole row instead of against the message column. */
@@ -914,6 +929,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .col-tag { width: var(--tag-w, 110px); }
 .col-graph {
   width: var(--graph-w, 200px);
+  position: relative; /* containing block for the badge -> dot leader */
   flex: 0 0 auto;
   height: 100%;
   border-right: 1px solid rgba(255,255,255,0.05);
@@ -923,7 +939,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   min-width: 0;
   display: flex;
   align-items: center;
-  padding: 0 var(--msg-pad, 12px);
+  padding: 0 12px;
 }
 /* hierarchy: the message is the content, everything else is metadata */
 .col-msg .summary {

@@ -1646,6 +1646,9 @@ function paintViewport() {
       "--lane-line",
       dimRow ? "transparent" : laneTint(p.color, onHeadRow ? 0.85 : 0.55)
     );
+    // same hue at zero alpha: the bleed into the message column fades to this
+    // instead of `transparent`, which would interpolate through grey
+    row.style.setProperty("--lane-bg0", laneTint(p.color, 0));
     if (onHeadRow) row.classList.add("on-head");
     if (n.kind === "commit" && !localReach.has(n.id)) row.classList.add("remote-only");
     if (n.id === t.selected) row.classList.add("selected");
