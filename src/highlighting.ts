@@ -103,7 +103,7 @@ export function langForFile(file: string): string | null {
 // So we highlight the joined text, then split the result on newlines, closing
 // every still-open span at the end of a line and reopening it on the next.
 export function hlLines(lines: string[], lang: string | null): string[] {
-  if (!lang) return lines.map(escapeHtml);
+  if (!lang || lines.length > 2500 || lines.reduce((size, line) => size + line.length, 0) > 300000) return lines.map(escapeHtml);
   let html: string;
   try {
     html = hljs.highlight(lines.join("\n"), {

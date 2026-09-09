@@ -59,6 +59,10 @@ export function intraline(
 // char-level highlighting on paired changed lines.
 export function renderUnifiedDiff(diff: string, lang: string | null): string {
   const lines = diff.split("\n");
+  // Thousands of per-line DOM parses for character highlights can stall the
+  // WebView. Large diffs keep line colors and numbers without that extra work.
+  const detailed = lines.length <= 2000 && diff.length <= 300000;
+  if (!detailed) lang = null;
   // Pre-pass: rebuild each SIDE of the diff as its own document and
   // highlight it in one go. Per-row highlighting breaks block comments and
   // multi-line strings — continuation lines get coloured as plain code.
@@ -110,7 +114,7 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
           "del",
           String(d.ln),
           "",
-          i < pair
+          detailed && i < pair
             ? intraline(d.text, adds[i].text, lang, d.html, adds[i].html).o
             : d.html
         )
@@ -122,7 +126,7 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
           "add",
           "",
           String(a.ln),
-          i < pair
+          detailed && i < pair
             ? intraline(dels[i].text, a.text, lang, dels[i].html, a.html).n
             : a.html
         )

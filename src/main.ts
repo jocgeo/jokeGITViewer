@@ -4434,6 +4434,8 @@ function buildMinimap() {
   const total = rows.length;
   const contentH = body.scrollHeight || 1;
   if (!total) return;
+  const fragment = document.createDocumentFragment();
+  const buckets = new Set<string>();
   for (let i = 0; i < total; i++) {
     const el = rows[i] as HTMLElement;
     const kind = el.classList.contains("add")
@@ -4445,14 +4447,20 @@ function buildMinimap() {
     // position by the row's REAL pixel offset, not its index — hunk headers
     // and other rows aren't uniform height, so index fractions drift
     const top = el.offsetTop;
+    // One mark per kind per 1/1000 of the document is visually sufficient.
+    const bucket = `${kind}:${Math.floor(top / contentH * 1000)}`;
+    if (buckets.has(bucket)) continue;
+    buckets.add(bucket);
     const mark = document.createElement("div");
     mark.className = `mm ${kind}`;
     mark.style.top = `${(top / contentH) * 100}%`;
     mark.addEventListener("click", () => {
       body.scrollTop = top - body.clientHeight / 2;
     });
-    map.appendChild(mark);
+    fragment.appendChild(mark);
   }
+  // Write only after reading all row positions, avoiding repeated layouts.
+  map.appendChild(fragment);
 }
 
 function updateCommitEnabled() {

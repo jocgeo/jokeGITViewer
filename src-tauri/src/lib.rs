@@ -1124,6 +1124,7 @@ async fn wip_diff_split(
     staged: bool,
     full: Option<bool>,
 ) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     let ctx = if full.unwrap_or(false) { "-U100000" } else { "-U3" };
     if staged {
         return git(&path, &["diff", "--cached", ctx, "--", &file]);
@@ -1134,6 +1135,7 @@ async fn wip_diff_split(
     } else {
         synth_untracked_diff(&path, &file)
     }
+    }).await.map_err(|e| e.to_string())?
 }
 
 // Cherry-pick ONE FILE's changes from a commit into the working tree.
