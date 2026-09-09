@@ -8,6 +8,7 @@ use std::process::Command;
 mod recovery;
 mod remotes;
 mod remote_manager;
+mod worktrees;
 
 #[derive(Serialize)]
 pub struct Commit {
@@ -64,6 +65,10 @@ pub struct Submodule {
     name: String,
     path: String, // relative path inside the repo
     abs: String,  // absolute path (open as its own repo)
+    initialized: bool,
+    states: Vec<String>,
+    recorded: String,
+    head: String,
 }
 
 #[derive(Serialize)]
@@ -78,18 +83,18 @@ pub struct RepoData {
     conflict: ConflictState,
     describe: String, // `git describe` — nearest tag (repo "version")
     submodules: Vec<Submodule>,
+    worktrees: Vec<worktrees::Worktree>,
     fingerprint: String, // same value repo_fingerprint returns — saves a round-trip
 }
 
 fn load_submodules(path: &str) -> Vec<Submodule> {
     // declared submodules from .gitmodules: "submodule.<name>.path <relpath>"
-    let raw = git(path, &["config", "--file", ".gitmodules", "--get-regexp", "path"])
+    let raw = git_ro(path, &["config", "--null", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"])
         .unwrap_or_default();
     let mut out = Vec::new();
-    for line in raw.lines() {
-        let mut it = line.splitn(2, ' ');
-        let key = it.next().unwrap_or("");
-        let rel = it.next().unwrap_or("").trim().to_string();
+    for entry in raw.split('\0') {
+        let Some((key, rel)) = entry.split_once('\n') else { continue };
+        let rel = rel.to_string();
         if rel.is_empty() {
             continue;
         }
@@ -98,13 +103,104 @@ fn load_submodules(path: &str) -> Vec<Submodule> {
             .and_then(|k| k.strip_suffix(".path"))
             .unwrap_or(&rel)
             .to_string();
+        let abs = Path::new(path).join(&rel).to_string_lossy().into_owned();
+        let initialized = submodule_is_ready(&abs);
+        let mut states = Vec::new();
+        let mut recorded = String::new();
+        let mut conflicted = false;
+        match git_ro(path, &["ls-files", "--stage", "-z", "--", &format!(":(literal){rel}")]) {
+            Ok(index) => {
+                for row in index.split('\0') {
+                    let Some((meta, _)) = row.split_once('\t') else { continue };
+                    let fields: Vec<_> = meta.split_whitespace().collect();
+                    if fields.len() == 3 && fields[0] == "160000" {
+                        if fields[2] == "0" { recorded = fields[1].to_string(); }
+                        else { conflicted = true; }
+                    }
+                }
+            }
+            Err(_) => states.push("unknown".into()),
+        }
+        if recorded.is_empty() && !conflicted && !states.iter().any(|s| s == "unknown") {
+            states.push("unknown".into());
+        }
+        let mut head = String::new();
+        if initialized {
+            head = git_ro(&abs, &["rev-parse", "--verify", "HEAD"]).unwrap_or_default().trim().to_string();
+            match git_ro(&abs, &["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"]) {
+                Ok(status) => {
+                    if !status.is_empty() { states.push("modified".into()); }
+                    conflicted |= status.lines().any(|line| {
+                        line.get(..2).is_some_and(|xy| matches!(xy, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU"))
+                    });
+                }
+                Err(_) => states.push("unknown".into()),
+            }
+            if head.is_empty() { states.push("unknown".into()); }
+            else if !recorded.is_empty() && head != recorded { states.push("different-commit".into()); }
+        } else { states.push("uninitialized".into()); }
+        if conflicted { states.push("conflicted".into()); }
+        if states.is_empty() { states.push("clean".into()); }
         out.push(Submodule {
             name,
-            abs: format!("{path}/{rel}"),
+            abs,
             path: rel,
+            initialized, states, recorded, head,
         });
     }
     out
+}
+
+fn submodule_is_ready(path: &str) -> bool {
+    // An empty submodule directory lets Git discover the parent repository.
+    // Require its own .git marker and verify the exact working-tree root.
+    if !Path::new(path).join(".git").exists() { return false; }
+    let Ok(root) = git_ro(path, &["rev-parse", "--show-toplevel"]) else { return false };
+    match (std::fs::canonicalize(path), std::fs::canonicalize(root.trim())) {
+        (Ok(expected), Ok(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+#[tauri::command]
+async fn submodule_ready(path: String) -> bool {
+    submodule_is_ready(&path)
+}
+
+fn check_submodule_work(path: &str) -> Result<(), String> {
+    if !submodule_is_ready(path) { return Ok(()); }
+    // Check real file edits separately from nested gitlink movement: clean
+    // nested checkouts at another commit are exactly what Update should fix.
+    let status = git_ro(path, &["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all"])?;
+    if !status.trim().is_empty() {
+        return Err(format!("Submodule has local changes: {path}. Commit or stash them before updating."));
+    }
+    for child in load_submodules(path) {
+        if child.states.iter().any(|s| s == "conflicted") {
+            return Err(format!("Resolve submodule conflicts first: {}", child.path));
+        }
+        if child.initialized { check_submodule_work(&child.abs)?; }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_submodule(path: String, file: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if Path::new(&file).is_absolute() || Path::new(&file).components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))) {
+            return Err("Invalid submodule path.".to_string());
+        }
+        let module = load_submodules(&path).into_iter().find(|s| s.path == file)
+            .ok_or_else(|| "This submodule is no longer declared in .gitmodules.".to_string())?;
+        if module.recorded.is_empty() || module.states.iter().any(|s| s == "conflicted") {
+            return Err("The submodule has no resolved commit in the parent index. Resolve or stage it first.".to_string());
+        }
+        check_submodule_work(&module.abs)?;
+        // Explicit checkout avoids user-configured merge/rebase update modes.
+        // No --remote or --force: use recorded commits and retain Git's checks.
+        git(&path, &["--literal-pathspecs", "submodule", "update", "--init", "--recursive", "--checkout", "--", &file])
+            .map(|_| ())
+    }).await.map_err(|e| e.to_string())?
 }
 
 // Unit + record separators used in git --pretty format.
@@ -700,6 +796,7 @@ async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String>
     let wip = wip_from_status(&status_raw, &head);
     let fingerprint = format!("{}\n{}\n{}\n{}", head, status_raw, fp_refs, fp_stash.trim());
 
+    let worktrees = worktrees::list(&path)?;
     Ok(RepoData {
         path,
         head,
@@ -711,6 +808,7 @@ async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String>
         conflict,
         describe,
         submodules,
+        worktrees,
         fingerprint,
     })
 }
@@ -2198,6 +2296,11 @@ pub fn run() {
             force_push,
             remotes::remote_choices,
             remote_manager::remote_settings,
+            submodule_ready,
+            worktrees::worktree_switch,
+            worktrees::worktree_list,
+            worktrees::worktree_cleanup,
+            update_submodule,
             remote_manager::remote_manage,
             remote_manager::branch_remote_setting,
             pull,

@@ -37,7 +37,13 @@ export interface ConflictState {
   kind: string; // merge | rebase | cherry-pick | revert | ""
   files: string[];
 }
+export interface Worktree {
+  path: string; head: string; branch: string; bare: boolean;
+  locked: boolean; missing: boolean; dirty: boolean | null;
+  kept_reason?: string;
+}
 export interface RepoData {
+  worktrees?: Worktree[];
   path: string;
   head: string;
   head_branch: string;
@@ -47,13 +53,17 @@ export interface RepoData {
   wip: WipStatus | null;
   conflict: ConflictState;
   describe: string;
-  submodules: { name: string; path: string; abs: string }[];
+  submodules: {
+    name: string; path: string; abs: string;
+    initialized?: boolean; states?: string[]; recorded?: string; head?: string;
+  }[];
   fingerprint: string;
 }
 
 // ---- unified graph node ----
 export type NodeKind = "commit" | "stash" | "wip";
 export interface GNode {
+  worktree?: Worktree;
   id: string; // commit/stash hash, or "__WIP__"
   kind: NodeKind;
   parents: string[];
@@ -83,4 +93,3 @@ export interface Tab {
   parentPath?: string; // set when this tab is a submodule of another repo
   hlOff?: boolean; // lineage highlight cleared (click outside the graph)
 }
-

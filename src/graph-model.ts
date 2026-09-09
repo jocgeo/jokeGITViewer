@@ -45,6 +45,7 @@ export function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
     if (repo.head && !headHidden) tips.push(repo.head);
     for (const s of repo.stashes) if (s.parents[0]) tips.push(s.parents[0]);
     if (repo.wip?.parent && !headHidden) tips.push(repo.wip.parent);
+    for (const tree of repo.worktrees ?? []) if (tree.dirty && tree.head) tips.push(tree.head);
     const seen = new Set<string>();
     const stack = [...tips];
     while (stack.length) {
@@ -58,6 +59,17 @@ export function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
   }
 
   const nodes: GNode[] = [];
+  const pathKey = (path: string) => {
+    const key = path.replace(/\\/g, "/").replace(/\/$/, "");
+    return /^[a-z]:\//i.test(key) || key.startsWith("//") ? key.toLowerCase() : key;
+  };
+  for (const tree of repo.worktrees ?? []) {
+    if (!tree.dirty || tree.bare || tree.missing || pathKey(tree.path) === pathKey(repo.path)) continue;
+    nodes.push({
+      id: `__WORKTREE__:${tree.path}`, kind: "wip", worktree: tree,
+      parents: tree.head ? [tree.head] : [], time: Number.MAX_SAFE_INTEGER - 1,
+    });
+  }
   if (repo.wip) {
     nodes.push({
       id: WIP_ID,
@@ -151,4 +163,3 @@ export function layout(nodes: GNode[]): { placed: Placed[]; maxLane: number } {
 
   return { placed, maxLane };
 }
-

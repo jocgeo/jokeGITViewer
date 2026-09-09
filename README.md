@@ -33,10 +33,37 @@ bundled libgit2, no heavy runtime. Small binary, native window.
 ### Repositories, branches & submodules
 - **Multiple repos in tabs** — reorder by drag & drop, session restored on start
 - **Submodules** in the sidebar: open one as its own tab, breadcrumbed to its parent
+- Submodule badges show uninitialized checkouts, local modifications (including
+  untracked files), conflicts, and commits differing from the parent index.
+  Hover to see recorded/current commit IDs. Unavailable checkouts cannot open as
+  the parent repository; cached entries show unknown status until refreshed.
+- Right-click a submodule to **Initialize** it or **Update to recorded commit**,
+  including nested submodules. Clicking an unavailable checkout offers to initialize
+  and open it. Updates use commits recorded by the parents, check initialized
+  checkouts for local changes first, and never force a checkout. Open tabs refresh
+  after the operation; an error can leave some nested submodules already updated.
 - Collapsible **Local / Remote / Stashes / Tags / Submodules** sections
 - Local 🖥 / remote ☁ icons, branches sorted by most recent commit
 - **Hide branches** from the graph, **search** branches / commits / tags
-- Double-click a branch to check it out (dirty tree auto-stashes after a confirm)
+- Double-click a branch to open its worktree. Its staged changes, unstaged edits,
+  and untracked files stay in that folder when you move to another branch.
+- **Worktrees** in the sidebar lists all checkouts and their local-change status.
+  Returning to a branch opens its existing worktree. Branches without a worktree
+  get a separate folder under the repository's common Git directory in
+  `jkt-worktrees/`. Clean managed worktrees are removed when switching away;
+  their branches remain and the folders can be recreated on return. Dirty,
+  locked, detached, main, and manually created worktrees are retained, as are
+  worktrees containing ignored local files.
+  The repository path changes when navigating worktrees, so open external editors
+  from the active tab. New worktrees start from committed content; existing edits
+  stay with the original worktree. Automatic worktree creation does not initialize
+  submodules; use the submodule Initialize action when needed.
+- Graph worktrees use a solid double-folder icon (blue when clean, orange with
+  local changes), distinct from dashed stash nodes. Multiple worktrees are listed
+  separately in the sidebar, including detached checkouts.
+- Dirty inactive worktrees also appear as labeled **Saved work** graph rows
+  connected to their checkout commits. Click one to open that worktree's changes.
+  Changes remain in their original folders; no stash or file copying is involved.
 - **Drag one branch onto another** in the graph → merge or rebase from a menu
 
 ### Diffs, blame & file history

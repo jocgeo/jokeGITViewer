@@ -327,7 +327,42 @@ function moveTab(from: number, to: number) {
   saveSession();
 }
 
+const cleaningWorktrees = new Set<string>();
+async function cleanupPreviousWorktree(previous: Tab | null) {
+  const selected = cur();
+  if (!selected) return;
+  const candidates = new Set((selected.repo.worktrees ?? []).filter(w => w.dirty === false).map(w => w.path));
+  if (previous && previous !== selected) candidates.add(previous.repo.path);
+  for (const path of candidates) await cleanupOneWorktree(path);
+}
+async function cleanupOneWorktree(path: string) {
+  const current = cur();
+  if (!current || repoPathKey(path) === repoPathKey(current.repo.path)) return;
+  const key = repoPathKey(path);
+  if (cleaningWorktrees.has(key)) return;
+  cleaningWorktrees.add(key);
+  try {
+    const removed = await invoke<boolean>("worktree_cleanup", { path, activePath: current.repo.path });
+    if (!removed) return;
+    const activeTab = cur();
+    const index = tabs.findIndex(t => repoPathKey(t.repo.path) === key);
+    if (index !== -1) tabs.splice(index, 1);
+    active = activeTab ? tabs.indexOf(activeTab) : -1;
+    renderTabs(); saveSession();
+    const selected = cur();
+    if (selected) {
+      selected.repo.worktrees = await invoke<NonNullable<RepoData["worktrees"]>>("worktree_list", { path: selected.repo.path });
+      selected.nodes = buildNodes(selected.repo, selected.hidden);
+      if (cur() === selected) { renderSidebar(selected); renderGraph(selected); }
+    }
+    setStatus("Removed a clean worktree; its branch is preserved");
+  } catch (e) { console.warn("Clean worktree kept:", String(e)); }
+  finally { cleaningWorktrees.delete(key); }
+}
+
 function switchTab(i: number) {
+  if (!tabs[i] || cleaningWorktrees.has(repoPathKey(tabs[i].repo.path))) return;
+  const previous = cur();
   active = i;
   renderTabs();
   renderActive();
@@ -338,9 +373,12 @@ function switchTab(i: number) {
   const t = cur();
   if (t && !t.remoteTags) refreshRemoteTags(t);
   if (t && t.stale) reloadActive(); // refresh cached tab on first view
+  if (t) void initialFetch(t.repo.path);
+  void cleanupPreviousWorktree(previous);
 }
 
 function closeTab(i: number) {
+  const previous = cur();
   tabs.splice(i, 1);
   if (tabs.length === 0) {
     active = -1;
@@ -354,6 +392,9 @@ function closeTab(i: number) {
   syncChatToTab();
   void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
+  const selected = cur();
+  if (selected && selected !== previous) void initialFetch(selected.repo.path);
+  if (selected && selected !== previous) void cleanupPreviousWorktree(previous);
 }
 
 // ---- render everything for the active tab ----
@@ -516,6 +557,12 @@ function updateStatusBar(t: Tab | null) {
 
 function renderActive() {
   showDiffView(false);
+  // A previous worktree's staged/unstaged results must never stay actionable.
+  $("c-staged").replaceChildren();
+  $("c-unstaged").replaceChildren();
+  $("c-staged-n").textContent = "0";
+  $("c-unstaged-n").textContent = "0";
+  stagedCount = 0;
   const t = cur();
   updateStatusBar(t);
   if (!t) {
@@ -756,6 +803,25 @@ function renderSidebar(t: Tab) {
     sul.innerHTML = `<li class="muted empty-mini">none</li>`;
   }
 
+  const worktreeList = $("worktrees-list");
+  worktreeList.replaceChildren();
+  const worktrees = (repo.worktrees ?? []).filter(w => !w.bare);
+  $("count-worktree").textContent = String(worktrees.length);
+  for (const tree of worktrees) {
+    const li = document.createElement("li");
+    const label = tree.branch || `Detached ${tree.head.slice(0, 8)}`;
+    const state = tree.missing ? "Unavailable" : tree.dirty === null ? "Status unavailable" : tree.dirty ? "Local changes" :
+      repoPathKey(tree.path) === repoPathKey(repo.path) ? "Clean · active" : `Clean${tree.kept_reason ? ` · ${tree.kept_reason}` : ""}`;
+    li.innerHTML = `<span class="ricon worktree-icon">${icon("worktree")}</span><span class="rname">${escapeHtml(label)}</span><span class="worktree-state">${state}</span>`;
+    li.title = `${tree.path}\n${state}${tree.locked ? " · locked" : ""}`;
+    li.addEventListener("click", () => {
+      if (tree.missing) errorModal(`Worktree folder is unavailable: ${tree.path}`);
+      else if (editOn && editDirty()) errorModal("Save or cancel the file editor changes before switching worktrees.");
+      else if (!isBusy()) void loadRepo(tree.path).then(() => reloadActive());
+    });
+    worktreeList.append(li);
+  }
+
   // submodules — click to open as their own repo tab
   const subUl = $("submodules-list");
   subUl.innerHTML = "";
@@ -765,13 +831,72 @@ function renderSidebar(t: Tab) {
     li.innerHTML =
       `<span class="ricon">${icon("submodule")}</span>` +
       `<span class="rname">${escapeHtml(sm.name)}</span>`;
-    li.title = `${sm.path}\nOpen as repository`;
-    li.addEventListener("click", () => loadRepo(sm.abs, false, repo.path));
+    const labels: Record<string, string> = {
+      clean: "Clean", uninitialized: "Uninitialized", modified: "Modified",
+      conflicted: "Conflicted", "different-commit": "Different commit", unknown: "Status unavailable",
+    };
+    const states = document.createElement("span");
+    states.className = "submodule-states";
+    for (const state of new Set(sm.states ?? ["unknown"])) {
+      const badge = document.createElement("span");
+      badge.className = `submodule-state ${Object.prototype.hasOwnProperty.call(labels, state) ? state : "unknown"}`;
+      badge.textContent = labels[state] ?? labels.unknown;
+      states.append(badge);
+    }
+    li.append(states);
+    li.title = `${sm.path}\n${(sm.states ?? ["unknown"]).map(s => labels[s] ?? labels.unknown).join(", ")}` +
+      (sm.recorded ? `\nParent index: ${sm.recorded}` : "") + (sm.head ? `\nChecked out: ${sm.head}` : "");
+    li.addEventListener("click", async () => {
+      try {
+        if (!await invoke<boolean>("submodule_ready", { path: sm.abs })) {
+          if (await updateSubmodule(repo.path, sm.path, sm.abs, true)) {
+            await loadRepo(sm.abs, false, repo.path);
+          }
+          return;
+        }
+        await loadRepo(sm.abs, false, repo.path);
+      } catch (e) { errorModal(String(e)); }
+    });
+    li.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [{
+        label: sm.initialized === false ? "Initialize submodule (including nested)…" : "Update to recorded commit (including nested)…",
+        action: () => void updateSubmodule(repo.path, sm.path, sm.abs, sm.initialized === false),
+      }]);
+    });
     subUl.appendChild(li);
   });
   if (!subUl.children.length) {
     subUl.innerHTML = `<li class="muted empty-mini">none</li>`;
   }
+}
+
+async function updateSubmodule(path: string, file: string, abs: string, initialize: boolean): Promise<boolean> {
+  if (isBusy()) return false;
+  if (!await confirmModal(`${initialize ? "Initialize" : "Update"} submodule ${file} and its nested submodules?\n\nCheck out the commits recorded by their parents. This may download repositories and leave submodules in detached HEAD. Commit or stash local changes first.`)) return false;
+  if (isBusy()) return false;
+  pushBusy();
+  setStatus(`${initialize ? "Initializing" : "Updating"} submodule ${file}…`);
+  let succeeded = false;
+  try {
+    await invoke("update_submodule", { path, file });
+    succeeded = true;
+  } catch (e) {
+    errorModal(`Submodule update failed:\n${String(e)}\n\nSome nested submodules may already have updated. Their current state will be refreshed.`);
+  } finally {
+    const normalized = abs.replace(/\\/g, "/").replace(/\/$/, "");
+    for (const t of tabs) {
+      const p = t.repo.path.replace(/\\/g, "/").replace(/\/$/, "");
+      if (t.repo.path === path || p === normalized || p.startsWith(normalized + "/")) t.stale = true;
+    }
+    try {
+      if (cur()?.stale) await reloadActive();
+    } finally {
+      popBusy();
+      setStatus(succeeded ? `Submodule ${file} updated` : "Submodule update failed");
+    }
+  }
+  return succeeded;
 }
 
 // A display unit groups refs at a commit: a local branch is merged with its
@@ -1419,7 +1544,9 @@ function paintViewport() {
     const p = placed[i];
     const x = laneX(p.lane), y = rowY(p.row);
     const op = nodeOp(p.node.id);
-    if (p.node.kind === "stash") {
+    if (p.node.worktree) {
+      parts.push(`<g transform="translate(${x - 8} ${y - 8})" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="1.6" stroke-dasharray="2 2">${ICONS.worktree}</g>`);
+    } else if (p.node.kind === "stash") {
       const sz = NODE_R * 2.2;
       parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="#1e1e2a" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
     } else if (p.node.kind === "wip") {
@@ -1430,7 +1557,8 @@ function paintViewport() {
       // monitor for a local branch, a cloud for a remote-only one, a tag
       // glyph for tags. Ordinary commits stay small dots so the tips pop.
       const refsHere = refsByHash.get(c.hash) ?? [];
-      const tip = tipGlyph(refsHere);
+      const treesHere = (repo.worktrees ?? []).filter(w => !w.bare && !w.missing && w.head === c.hash);
+      const tip = treesHere.length ? "worktree" : tipGlyph(refsHere);
       const isMerge = c.parents.length > 1;
       const isHead = c.hash === repo.head;
       if (isHead) {
@@ -1444,6 +1572,7 @@ function paintViewport() {
       const title = `<title>${escapeHtml(
         (tip ? `${refsHere.map((r) => r.name).join(", ")} — ` : "") +
           who +
+          (treesHere.length ? ` · Worktrees: ${treesHere.map(w => `${w.branch || "detached"}${w.dirty ? " (local changes)" : ""}`).join(", ")}` : "") +
           (isFork ? "  ·  branch point" : "") +
           (remoteOnly ? "  ·  not in any local branch" : "")
       )}</title>`;
@@ -1461,9 +1590,9 @@ function paintViewport() {
         parts.push(
           `<g${op}>` +
             `<rect x="${x - half}" y="${y - half}" width="${TIP_SZ}" height="${TIP_SZ}" rx="4" ` +
-            `fill="${tip === "tag" ? TAG_COLOR : p.color}" stroke="#141420" stroke-width="1.5"/>` +
+            `fill="${tip === "worktree" ? (treesHere.some(w => w.dirty) ? "#ff9d5c" : "#9bd6f5") : tip === "tag" ? TAG_COLOR : p.color}" stroke="#141420" stroke-width="1.5"/>` +
             `<g transform="translate(${x - half + gp} ${y - half + gp}) scale(${gs})" ` +
-            `fill="none" stroke="#141420" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+            `fill="none" stroke="#141420" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${tip === "worktree" ? ' stroke-dasharray="2 2"' : ""}>` +
             `${ICONS[tip] ?? ""}</g>${title}</g>`
         );
       } else {
@@ -1497,12 +1626,17 @@ function paintViewport() {
     if (onHeadRow) row.classList.add("on-head");
     if (n.kind === "commit" && !localReach.has(n.id)) row.classList.add("remote-only");
     if (n.id === t.selected) row.classList.add("selected");
-    if (levelOf(n.id) === 0) row.classList.add("dim");
+    if (!n.worktree && levelOf(n.id) === 0) row.classList.add("dim");
 
     let branchHtml = "";
     let tagHtml = "";
     let msgHtml = "";
-    if (n.kind === "wip") {
+    if (n.worktree) {
+      const tree = n.worktree;
+      branchHtml = `<span class="badge wip">${icon("worktree")}${escapeHtml(tree.branch || "Detached worktree")}</span>`;
+      msgHtml = `<span class="badge wip">Saved work</span><span class="summary">Uncommitted changes — ${escapeHtml(tree.branch || tree.head.slice(0, 8))}</span>`;
+      row.title = `${tree.path}\nClick to open this worktree's uncommitted changes.`;
+    } else if (n.kind === "wip") {
       const w = n.wip!;
       const ps: string[] = [];
       if (w.staged) ps.push(`${w.staged} staged`);
@@ -1765,10 +1899,53 @@ async function selectNode(n: GNode | null, scroll = false) {
 
   $("detail").classList.remove("collapsed"); // reopen panel on selection
   $("detail-empty").classList.add("hidden");
-  $("commit-panel").classList.toggle("hidden", n.kind !== "wip");
-  $("detail-body").classList.toggle("hidden", n.kind === "wip");
+  $("commit-panel").classList.toggle("hidden", n.kind !== "wip" || !!n.worktree);
+  $("detail-body").classList.toggle("hidden", n.kind === "wip" && !n.worktree);
   bodyReqHash = ""; // drop any in-flight body fetch from the previous selection
   $("d-body").classList.add("hidden");
+
+  if (n.worktree) {
+    const path = n.worktree.path;
+    const stillSelected = () => cur() === t && t.selected === n.id;
+    $("d-summary").textContent = `Saved work — ${n.worktree.branch || "detached worktree"}`;
+    $("d-meta").textContent = path;
+    const openButton = document.createElement("button");
+    openButton.textContent = "Open worktree";
+    openButton.addEventListener("click", async () => {
+      if (isBusy()) return;
+      await loadRepo(path);
+      await reloadActive();
+    });
+    $("d-meta").append(openButton);
+    const list = $("d-files");
+    list.textContent = "Loading saved changes…";
+    try {
+      const changes = await invoke<{ staged: FileChange[]; unstaged: FileChange[] }>("wip_status", { path });
+      if (!stillSelected()) return;
+      list.replaceChildren();
+      let previewRequest = 0;
+      for (const staged of [true, false]) {
+        for (const file of staged ? changes.staged : changes.unstaged) {
+          const row = document.createElement("li");
+          row.textContent = `${staged ? "Staged" : "Unstaged"} · ${file.path}`;
+          row.addEventListener("click", async () => {
+            const request = ++previewRequest;
+            const body = $("d-body");
+            body.classList.remove("hidden"); body.textContent = "Loading diff…";
+            try {
+              const diff = await invoke<string>("wip_diff_split", { path, file: file.path, staged, full: false });
+              if (stillSelected() && request === previewRequest) body.textContent = diff || "No text changes.";
+            } catch (e) {
+              if (stillSelected() && request === previewRequest) body.textContent = String(e);
+            }
+          });
+          list.append(row);
+        }
+      }
+      if (!list.children.length) list.textContent = "This worktree is now clean.";
+    } catch (e) { if (stillSelected()) list.textContent = String(e); }
+    return;
+  }
 
   if (n.kind === "wip") {
     await refreshCommitFiles();
@@ -2423,9 +2600,16 @@ async function doClone() {
   }
 }
 
+function repoPathKey(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  return /^[a-z]:\//i.test(normalized) || normalized.startsWith("//") ? normalized.toLowerCase() : normalized;
+}
+
 async function loadRepo(path: string, silent = false, parentPath?: string) {
+  if (cleaningWorktrees.has(repoPathKey(path))) return;
+  const previous = cur();
   // already open? just focus it.
-  const existing = tabs.findIndex((t) => t.repo.path === path);
+  const existing = tabs.findIndex((t) => repoPathKey(t.repo.path) === repoPathKey(path));
   if (existing !== -1) {
     if (parentPath) tabs[existing].parentPath = parentPath;
     switchTab(existing);
@@ -2453,6 +2637,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     saveRepoCache(path, repo);
     refreshRemoteTags(tab);
     void initialFetch(path); // the graph is already up; refresh it in the background
+    void cleanupPreviousWorktree(previous);
   } catch (e) {
     setStatus("");
     if (silent) console.warn("skip repo", path, String(e));
@@ -2552,6 +2737,8 @@ async function restoreSession() {
   if (t) {
     refreshRemoteTags(t);
     if (t.stale) reloadActive(); // refresh the visible tab in the background
+    void initialFetch(t.repo.path);
+    void cleanupPreviousWorktree(null);
   }
 }
 
@@ -2613,9 +2800,11 @@ async function refreshCommitFiles() {
   try {
     res = await invoke("wip_status", { path });
   } catch (e) {
+    if (cur() !== t) return;
     $("c-unstaged").innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
     return;
   }
+  if (cur() !== t || cur()?.repo.path !== path) return;
   stagedCount = res.staged.length;
 
   const buildList = (ulId: string, files: FileChange[], stage: boolean) => {
@@ -3219,8 +3408,9 @@ async function toggleEditFile() {
     lastView?.(); // back to the diff/plain view
     return;
   }
-  const { path, file, hash } = diffCtx;
-  // Editing a file from a commit: check that commit out FIRST, so the edit is
+  let { path } = diffCtx;
+  const { file, hash } = diffCtx;
+  // Editing a file from a commit: open its worktree first, so the edit is
   // made on top of the state it belongs to (not mixed into whatever is
   // currently checked out).
   if (hash) {
@@ -3246,24 +3436,23 @@ async function toggleEditFile() {
       const ok = await confirmModal(
         local
           ? `Check out branch "${target}" (at ${hash.slice(0, 8)}) before editing ${basename(file)}?\n\n` +
-              `Uncommitted changes are stashed first.`
+              `Your current worktree and local changes stay in place.`
           : remote
             ? `Check out "${target}" (tracking ${remote.name}) before editing ${basename(file)}?\n\n` +
                 `The local branch is created if it doesn't exist yet, so you stay on a branch ` +
-                `instead of a detached HEAD.\n\nUncommitted changes are stashed first.`
+                `instead of a detached HEAD.\n\nYour current worktree and local changes stay in place.`
             : `Check out commit ${hash.slice(0, 8)} before editing ${basename(file)}?\n\n` +
                 `No branch points at this commit, so the repo goes into DETACHED HEAD state — ` +
                 `commit to a new branch afterwards or the work is easy to lose.\n\n` +
-                `Uncommitted changes are stashed first.`
+                `Your current worktree and local changes stay in place.`
       );
       if (!ok) return;
       setStatus(`checking out ${label}…`);
       pushBusy();
       try {
-        const stashed = await invoke<boolean>("checkout", { path, target, upstream });
-        await reloadActive(
-          stashed ? `Checked out ${label} — local changes stashed` : `Checked out ${label}`
-        );
+        path = await invoke<string>("worktree_switch", { path, target, upstream, create: false });
+        await loadRepo(path);
+        await reloadActive(`Opened worktree for ${label}`);
       } catch (e) {
         setStatus("");
         errorModal("Checkout failed — not editing:\n" + String(e));
@@ -4332,16 +4521,26 @@ async function reloadGraphOnly() {
   }
 }
 
-// One fetch right after a repo is opened, so the graph reflects origin instead
+// Fetch when a repo is opened or selected, so the graph reflects remotes instead
 // of whatever the last clone/fetch left behind. Deliberately AFTER the tab is
 // rendered: the repo shows instantly and this fills in remote state when it
 // lands. Silent on failure (no remote, offline, auth prompt).
+const pendingFetches = new Map<string, Promise<unknown>>();
+function fetchRepo(path: string): Promise<unknown> {
+  const pending = pendingFetches.get(path);
+  if (pending) return pending;
+  const request = invoke("fetch", { path }).finally(() => pendingFetches.delete(path));
+  pendingFetches.set(path, request);
+  return request;
+}
+
 async function initialFetch(path: string) {
-  const still = () => cur()?.repo.path === path;
+  const tab = cur();
+  const still = () => !!tab && cur() === tab && tab.repo.path === path;
   if (!still()) return;
   setStatus("fetching remotes…");
   try {
-    await invoke("fetch", { path });
+    await fetchRepo(path);
   } catch {
     if (still()) setStatus(""); // no remote / offline — nothing to report
     return;
@@ -4349,8 +4548,10 @@ async function initialFetch(path: string) {
   if (!still()) return; // user switched tabs meanwhile
   const t = cur()!;
   await reloadGraphOnly();
-  refreshRemoteTags(t);
-  setStatus("Fetched remotes");
+  if (still()) {
+    void refreshRemoteTags(t);
+    setStatus("Fetched remotes");
+  }
 }
 
 // quietly fetch in the background so pushes from elsewhere show up; the
@@ -4361,7 +4562,7 @@ async function autoFetch() {
   if (!t || autoFetching || isBusy() || t.repo.conflict.active) return;
   autoFetching = true;
   try {
-    await invoke("fetch", { path: t.repo.path });
+    await fetchRepo(t.repo.path);
   } catch {
     /* offline / no remote / auth — ignore */
   } finally {
@@ -4371,6 +4572,7 @@ async function autoFetch() {
 
 // ---- auto-refresh: poll a cheap fingerprint, reload graph on any change ----
 let polling = false;
+const worktreeRefreshTimes = new WeakMap<Tab, number>();
 async function pollActive() {
   if (polling) return;
   const t = cur();
@@ -4378,6 +4580,15 @@ async function pollActive() {
   polling = true;
   try {
     await checkOpenFileChanged(); // content edits don't move the fingerprint
+    if (Date.now() - (worktreeRefreshTimes.get(t) ?? 0) > 10000 && !isBusy()) {
+      worktreeRefreshTimes.set(t, Date.now());
+      const worktrees = await invoke<NonNullable<RepoData["worktrees"]>>("worktree_list", { path: t.repo.path });
+      if (JSON.stringify(worktrees) !== JSON.stringify(t.repo.worktrees)) {
+        t.repo.worktrees = worktrees;
+        t.nodes = buildNodes(t.repo, t.hidden);
+        if (cur() === t) { renderSidebar(t); renderGraph(t); }
+      }
+    }
     const fp = await invoke<string>("repo_fingerprint", { path: t.repo.path });
     if (t.fingerprint === undefined) {
       t.fingerprint = fp; // first sight: baseline, don't reload
@@ -4515,15 +4726,9 @@ async function reloadActive(statusMsg?: string) {
   }
 }
 
-// double-click checkout: confirm first if there are uncommitted changes
+// Branch navigation opens another worktree; the source index and files stay put.
 async function doCheckoutConfirm(t: Tab, target: string, upstream?: string) {
-  if (t.repo.wip) {
-    const ok = await confirmModal(
-      `Checkout ${target}? Uncommitted changes will be stashed.`
-    );
-    if (!ok) return;
-  }
-  doCheckout(target, upstream);
+  if (cur() === t) await doCheckout(target, upstream);
 }
 
 // right-click on a repo (tab / path) -> open it externally
@@ -4747,22 +4952,23 @@ async function chatSendCurrent() {
   }
 }
 
-async function doCheckout(target: string, upstream?: string) {
+async function doCheckout(target: string, upstream?: string, create = false) {
   const t = cur();
   if (!t) return;
-  setStatus(`checking out ${target}…`);
+  if (isBusy()) return;
+  if (editOn && editDirty()) { errorModal("Save or cancel the file editor changes before switching worktrees."); return; }
+  setStatus(`opening worktree for ${target}…`);
   pushBusy();
   try {
-    const stashed = await invoke<boolean>("checkout", {
+    const directory = await invoke<string>("worktree_switch", {
       path: t.repo.path,
       target,
       upstream: upstream ?? null,
+      create,
     });
-    await reloadActive(
-      stashed
-        ? `Checked out ${target} — local changes stashed`
-        : `Checked out ${target}`
-    );
+    t.stale = true;
+    await loadRepo(directory);
+    await reloadActive(`Opened ${target} — changes stay in each worktree`);
   } catch (e) {
     setStatus("");
     errorModal("Checkout failed:\n" + String(e));
@@ -4871,12 +5077,7 @@ async function doBranch() {
   const t = cur();
   if (!t) return;
   const name = await promptModal("New branch name", "feature/my-branch");
-  if (name)
-    runAction(
-      invoke("create_branch_checkout", { path: t.repo.path, name }),
-      `Created & switched to ${name}`,
-      "branch-btn"
-    );
+  if (name && cur() === t) await doCheckout(name, undefined, true);
 }
 async function doStashBtn() {
   const t = cur();
@@ -5280,6 +5481,7 @@ function hashStr(s: string): number {
 
 // Simple gray line icons (no emoji).
 const ICONS: Record<string, string> = {
+  worktree: `<path d="M1 5V2h5l2 2h6v9H4V5Z"/><path d="M1 5h10v9H1Z"/>`,
   local: `<rect x="2" y="3.5" width="12" height="8" rx="1"/><path d="M6.5 14h3"/>`,
   remote: `<path d="M4.7 12a2.3 2.3 0 0 1-.2-4.6 3.2 3.2 0 0 1 6.2-.7A2.4 2.4 0 0 1 11.3 12z"/>`,
   tag: `<path d="M2.6 7.6V3.1a.5.5 0 0 1 .5-.5h4.5l5.3 5.3a1 1 0 0 1 0 1.4l-3.1 3.1a1 1 0 0 1-1.4 0z"/><circle cx="5" cy="5" r=".7"/>`,

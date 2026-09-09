@@ -18,6 +18,17 @@
 
 * { box-sizing: border-box; }
 
+#submodules-list li { flex-wrap: wrap; }
+.submodule-states { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.submodule-state { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; font-size: 10px; color: var(--muted); background: var(--bg2); }
+.submodule-state.clean { color: #87dca0; }
+.submodule-state.modified, .submodule-state.different-commit { color: #f0c46d; }
+.submodule-state.conflicted { color: #ff9c9c; border-color: #85464e; }
+.submodule-state.uninitialized { color: #b7b0e1; }
+.worktree-icon { color: #9bd6f5; }
+.worktree-state { margin-left: auto; font-size: 10px; color: var(--muted); white-space: nowrap; }
+#worktrees-list li { gap: 6px; }
+
 /* Shared dark scrollbars: tabs, graph, diffs, sidebars and dialogs. */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: var(--scroll-track); }
@@ -238,7 +249,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #chat-send { padding: 4px 12px; }
 
 /* context menu */
-#ctxmenu {
+.ctxmenu {
   position: fixed;
   z-index: 1000;
   min-width: 180px;
@@ -255,6 +266,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   white-space: nowrap;
 }
 .ctxitem:hover { background: var(--accent); color: #0a0a12; }
+.ctxitem:focus-visible { outline: 1px solid var(--accent); }
+.ctxitem { display: flex; align-items: center; gap: 10px; }
+.ctxarrow { margin-left: auto; padding-left: 18px; }
+.ctxmenu .ctxmenu { color: var(--fg); cursor: default; }
 .ctxsep { height: 1px; background: var(--border); margin: 4px 0; }
 
 /* modal (prompt / confirm) */
