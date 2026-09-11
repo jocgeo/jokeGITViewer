@@ -138,6 +138,7 @@
           <ul id="hist-list"></ul>
         </aside>
 
+        <div class="splitter" id="split-history" title="Drag to resize history"></div>
         <main id="graphpane">
           <div id="scroll">
             <div id="col-headers">
@@ -167,6 +168,7 @@
               <div id="empty" class="empty">Open a repository to view its commit graph.</div>
             </div>
           </div>
+          <div class="splitter" id="split-graph-code" role="separator" aria-label="Graph and code width" aria-orientation="vertical" tabindex="0" title="Drag to resize graph and code; double-click to reset"></div>
           <div id="diffview" class="hidden">
             <div id="diffview-head">
               <span id="diffview-title"></span>
@@ -180,6 +182,7 @@
               <span class="dv-btns">
                 <button id="diffview-save" class="mini hidden" title="Save changes to the file in the working tree (Ctrl+S)">💾 Save</button>
                 <button id="diffview-modify" class="mini" title="Edit this file and save it to the working tree">Modify</button>
+                <button id="diffview-worktree" class="mini" title="Open the current working-tree file beside this view">Side-by-side</button>
                 <button id="diffview-whole" class="mini hidden" title="Toggle between changed hunks only and the whole file">Whole file</button>
                 <button id="diffview-copy" class="mini hidden" title="Copy the whole file content to the clipboard">⧉ Copy</button>
                 <button id="diffview-plain" class="mini" title="Show the file as it is (no diff markers) — selectable for copying">Plain</button>
@@ -193,6 +196,19 @@
             <div id="diff-main">
               <div id="diffview-body"></div>
               <div id="diff-minimap"></div>
+              <div id="split-worktree" class="splitter hidden" title="Drag to resize current worktree view"></div>
+              <section id="worktree-view" class="hidden" aria-label="Current working-tree file">
+                <div id="worktree-head">
+                  <span id="worktree-title"></span>
+                  <button id="worktree-scroll-lock" class="mini" aria-pressed="true" title="Link scrolling with the historical view">Scroll lock: on</button>
+                  <button id="worktree-modify" class="mini hidden">Modify</button>
+                  <button id="worktree-save" class="mini hidden">Save</button>
+                  <button id="worktree-cancel" class="mini hidden">Cancel</button>
+                  <button id="worktree-refresh" class="mini" title="Reload the file from disk">Refresh</button>
+                  <button id="worktree-close" class="mini" title="Close current worktree view">✕</button>
+                </div>
+                <div id="worktree-body"></div>
+              </section>
             </div>
           </div>
           <div id="mergeview" class="hidden">

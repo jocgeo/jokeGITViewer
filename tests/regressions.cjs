@@ -6,6 +6,99 @@ const assert = require('assert/strict');
 const sourceRoot = path.resolve(__dirname, '..');
 const ts = require('typescript');
 const source = fs.readFileSync(path.join(sourceRoot,'src/main.ts'),'utf8');
+{
+  const modules = new Map();
+  function loadTs(relative) {
+    const filename = path.resolve(sourceRoot, relative);
+    if (modules.has(filename)) return modules.get(filename);
+    const module = { exports: {} };
+    modules.set(filename, module.exports);
+    const ctx = {
+      module, exports: module.exports,
+      require: name => name.endsWith('.css') ? {} : name.startsWith('.')
+        ? loadTs(path.relative(sourceRoot, path.resolve(path.dirname(filename), name + '.ts')))
+        : require(name),
+    };
+    vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
+    }).outputText, ctx);
+    return module.exports;
+  }
+  const { renderUnifiedDiff } = loadTs('src/diff/render.ts');
+  const comment = ['/*', " * Every string's voltage and current.", ' * Read the float value for protection.', ' */'];
+  for (const sign of ['+', '-']) {
+    // The first hunk starts inside a comment whose opening/closing lines Git
+    // omitted. Its apostrophe must not poison syntax in the next hunk.
+    const diff = [
+      '--- a/test.c', '+++ b/test.c', '@@ -10,2 +10,2 @@',
+      " * The sensor's previous value", ' * is checked here.',
+      '@@ -40,0 +40,5 @@', ...comment.map(line => sign + line),
+      sign + 'float reading;', '',
+    ].join('\n');
+    const html = renderUnifiedDiff(diff, 'c');
+    const rows = html.split('<div').filter(row => row.includes(`class="dl ${sign === '+' ? 'add' : 'del'}"`));
+    assert.equal(rows.length, 5);
+    for (const row of rows.slice(0, 4)) {
+      assert(row.includes('class="hljs-comment"'), row);
+      assert(!row.includes('class="hljs-string"'), row);
+      assert(!row.includes('class="hljs-type"'), row);
+    }
+    assert(!rows[4].includes('class="hljs-comment"'));
+    assert(rows[4].includes('class="hljs-type"'));
+  }
+  const full = renderUnifiedDiff('@@ -0,0 +1,4 @@\n' + comment.map(line => '+' + line).join('\n'), 'c');
+  assert.equal((full.match(/class="hljs-comment"/g) || []).length, 4);
+  console.log('PASS: diff hunks isolate syntax state and preserve multiline comments on both sides');
+}
+// A refresh while a file is open measures hidden headers at zero. Closing
+// either viewer must restore SVG, connectors and hit testing after revealing.
+{
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, {
+        classList: {
+          add: name => classes.add(name),
+          toggle: (name, on) => on ? classes.add(name) : classes.delete(name),
+          contains: name => classes.has(name),
+        },
+        style: { setProperty(name, value) { this[name] = value; } },
+      });
+    }
+    return elements.get(id);
+  };
+  let paints = 0;
+  const ctx = {
+    $: element, gctx: { graphLeft: 0 }, dvfClose() {}, syncWorktreeView() {},
+    paintViewport() { paints++; },
+    document: {
+      getElementById: () => ({ getBoundingClientRect: () => ({ left: 20 }) }),
+      querySelector: () => ({ getBoundingClientRect: () => ({
+        left: element('col-headers').classList.contains('hidden') ? 20 : 458,
+      }) }),
+    },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(ts.transpile(
+    source.slice(source.indexOf('function graphColumnLeft()'), source.indexOf('// ---- column widths')) +
+    source.slice(source.indexOf('let histSplit = false;'), source.indexOf('// ---- merge conflict resolution ----'))
+  ), ctx);
+  for (const open of [() => ctx.showDiffView(true), () => ctx.showMergeView(true)]) {
+    open();
+    ctx.gctx.graphLeft = ctx.graphColumnLeft();
+    assert.equal(ctx.gctx.graphLeft, 0);
+    ctx.showDiffView(false);
+    assert.equal(ctx.gctx.graphLeft, 438);
+    assert.equal(element('graph-svg').style.left, '438px');
+    assert.equal(element('graphpane').style['--graph-left'], '438px');
+  }
+  ctx.showDiffView(true);
+  vm.runInContext('histSplit = true; showDiffView(true);', ctx);
+  assert.equal(ctx.gctx.graphLeft, 438);
+  assert.equal(paints, 3);
+  console.log('PASS: closing file/merge views and entering split view restores graph alignment');
+}
 const rust = fs.readFileSync(path.join(sourceRoot,'src-tauri/src/lib.rs'),'utf8').replace(/\r\n/g,'\n');
 const root=fs.mkdtempSync(path.join(require('os').tmpdir(),'jokegitviewer-tests-'));
 const emptyConfig=path.join(root,'empty.gitconfig');
@@ -80,7 +173,7 @@ console.log('PASS: abort preserves a pre-existing deletion (no stage 2)');
 async function raceTest(switchTabs) {
   const tab={repo:{path:'A'}};let active=tab;let resolve;const rendered=[];
   const ctx={cur:()=>active,invoke:()=>new Promise(r=>resolve=r),buildNodes:()=>[],renderSidebar:t=>rendered.push(t.repo.path),renderGraph:t=>rendered.push(t.repo.path),saveRepoCache:()=>{},console};
-  vm.createContext(ctx);vm.runInContext(ts.transpile(source.slice(source.indexOf('async function reloadGraphOnly()'),source.indexOf('// One fetch right after'))),ctx);
+  vm.createContext(ctx);vm.runInContext(ts.transpile(source.slice(source.indexOf('async function reloadGraphOnly()'),source.indexOf('// Fetch when a repo is opened or selected'))),ctx);
   const pending=ctx.reloadGraphOnly();if(switchTabs)active={repo:{path:'B'}};
   resolve({path:'A',fingerprint:'updated'});await pending;
   assert.deepEqual(rendered,switchTabs?[]:['A','A']);assert.equal(tab.fingerprint,'updated');

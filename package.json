@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node tests/regressions.cjs && node tests/recovery.cjs",
+    "test": "node tests/regressions.cjs && node tests/recovery.cjs && node tests/function-history.cjs && node tests/worktree-edit.cjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

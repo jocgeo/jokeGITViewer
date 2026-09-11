@@ -63,11 +63,19 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
   // WebView. Large diffs keep line colors and numbers without that extra work.
   const detailed = lines.length <= 2000 && diff.length <= 300000;
   if (!detailed) lang = null;
-  // Pre-pass: rebuild each SIDE of the diff as its own document and
-  // highlight it in one go. Per-row highlighting breaks block comments and
-  // multi-line strings — continuation lines get coloured as plain code.
+  // Highlight each side of each hunk as a block. Separate hunks omit source
+  // lines, so carrying parser state across that gap can turn a later comment
+  // into a string (until an apostrophe in the comment closes it).
   const oldTexts: string[] = [];
   const newTexts: string[] = [];
+  const oldHl: string[] = [];
+  const newHl: string[] = [];
+  const highlightHunk = () => {
+    for (const line of hlLines(oldTexts, lang)) oldHl.push(line);
+    for (const line of hlLines(newTexts, lang)) newHl.push(line);
+    oldTexts.length = 0;
+    newTexts.length = 0;
+  };
   const isMetaLine = (l: string) =>
     l.startsWith("diff ") || l.startsWith("index ") || l.startsWith("+++") ||
     l.startsWith("---") || l.startsWith("new file") ||
@@ -75,7 +83,11 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
     l.startsWith("new mode") || l.startsWith("similarity") ||
     l.startsWith("rename ") || l.startsWith("\\");
   for (const l of lines) {
-    if (l === "" || l.startsWith("@@") || isMetaLine(l)) continue;
+    if (l.startsWith("@@") || l.startsWith("diff ")) {
+      highlightHunk();
+      continue;
+    }
+    if (l === "" || isMetaLine(l)) continue;
     if (l.startsWith("+")) newTexts.push(l.slice(1));
     else if (l.startsWith("-")) oldTexts.push(l.slice(1));
     else {
@@ -83,8 +95,7 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
       newTexts.push(l.slice(1));
     }
   }
-  const oldHl = hlLines(oldTexts, lang);
-  const newHl = hlLines(newTexts, lang);
+  highlightHunk();
   let oi = 0; // cursor into oldHl
   let ni = 0; // cursor into newHl
   let oldN = 0;

@@ -1338,8 +1338,17 @@ async fn clone_repo(url: String, dest: String) -> Result<String, String> {
 // Write edited content to the file in the WORKING TREE (never stages it — the
 // change shows up as a normal unstaged edit the user reviews and commits).
 #[tauri::command]
-async fn write_file_worktree(path: String, file: String, content: String) -> Result<(), String> {
+async fn write_file_worktree(path: String, file: String, content: String, expected_content: Option<String>) -> Result<(), String> {
     let full = format!("{path}/{file}");
+    if let Some(expected) = expected_content {
+        let current = std::fs::read_to_string(&full).map_err(|e| e.to_string())?;
+        if current != expected {
+            return Err("The file changed on disk. Your edit has been kept; reload the current file before saving.".into());
+        }
+        // The scoped editor has already preserved all surrounding bytes and
+        // line endings; do not normalize the rest of the file.
+        return std::fs::write(&full, content).map_err(|e| e.to_string());
+    }
     // keep the file's existing line endings instead of forcing LF
     let crlf = std::fs::read_to_string(&full)
         .map(|s| s.contains("\r\n"))
@@ -2018,6 +2027,7 @@ pub struct HistEntry {
     summary: String,
     added: i64,   // lines added to this file in this commit (-1 binary)
     deleted: i64,
+    diff: Option<String>, // function-only patch, tracked from the original revision
 }
 
 // commits that touched a single file (follows renames), with +/- line counts
@@ -2050,6 +2060,7 @@ async fn file_history(path: String, file: String) -> Result<Vec<HistEntry>, Stri
                 summary: f[3].to_string(),
                 added: 0,
                 deleted: 0,
+                diff: None,
             });
         } else if line.contains('\t') {
             if let Some(e) = out.last_mut() {
@@ -2074,22 +2085,65 @@ async fn file_line_history(
     rev: String,
 ) -> Result<Vec<HistEntry>, String> {
     let range = format!("{start},{end}:{file}");
-    let fmt = format!("%H{US}%an{US}%ct{US}%s");
+    range_history(&path, range, &rev, false)
+}
+
+// Use Git's function-header detection (including .gitattributes diff drivers)
+// to find the initial range, then follow that range backward through edits.
+fn function_history_range(file: &str, name: &str) -> Result<String, String> {
+    let mut chars = name.chars();
+    let first = chars.next().ok_or("Enter a function name")?;
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$')
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        return Err("Enter a function name without parentheses or a class/module prefix".into());
+    }
+    // Match a complete identifier, so `read` does not select `read_all`.
+    let literal = name.replace('$', "\\$");
+    Ok(format!(":\\(^\\|[^a-zA-Z0-9_$]\\){literal}\\([^a-zA-Z0-9_$]\\|$\\):{file}"))
+}
+
+#[tauri::command]
+async fn file_function_history(
+    path: String,
+    file: String,
+    name: String,
+    rev: String,
+) -> Result<Vec<HistEntry>, String> {
+    let range = function_history_range(&file, name.trim())?;
+    tauri::async_runtime::spawn_blocking(move || range_history(&path, range, &rev, true))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn range_history(path: &str, range: String, rev: &str, with_patch: bool) -> Result<Vec<HistEntry>, String> {
+    let fmt = format!("{US}%H{US}%an{US}%ct{US}%s");
     let mut args = vec![
         "log".to_string(),
         "-L".to_string(),
         range,
-        "--no-patch".to_string(),
+        if with_patch { "--patch" } else { "--no-patch" }.to_string(),
+        "--no-color".to_string(),
+        "--no-ext-diff".to_string(),
+        "--no-textconv".to_string(),
         format!("--pretty=format:{fmt}"),
     ];
-    if !rev.trim().is_empty() {
-        args.push(rev);
-    }
+    // Resolve to a commit first so a revision can never be interpreted as an
+    // option, and worktree requests consistently start at the current HEAD.
+    let anchor = if rev.trim().is_empty() { "HEAD" } else { rev };
+    let commit = git(path, &["rev-parse", "--verify", "--end-of-options", &format!("{anchor}^{{commit}}")])?;
+    args.push(commit.trim().to_string());
     let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let raw = git(&path, &argrefs)?;
-    let mut out = Vec::new();
+    let raw = git(path, &argrefs)?;
+    let mut out: Vec<HistEntry> = Vec::new();
     for line in raw.lines() {
-        let f: Vec<&str> = line.split(US).collect();
+        let Some(header) = line.strip_prefix(US) else {
+            if let Some(diff) = out.last_mut().and_then(|entry| entry.diff.as_mut()) {
+                diff.push_str(line);
+                diff.push('\n');
+            }
+            continue;
+        };
+        let f: Vec<&str> = header.splitn(4, US).collect();
         if f.len() < 4 {
             continue;
         }
@@ -2100,6 +2154,7 @@ async fn file_line_history(
             summary: f[3].to_string(),
             added: 0,
             deleted: 0,
+            diff: if with_patch { Some(String::new()) } else { None },
         });
     }
     Ok(out)
@@ -2336,7 +2391,8 @@ pub fn run() {
             file_at_commit,
             blame,
             file_history,
-            file_line_history
+            file_line_history,
+            file_function_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

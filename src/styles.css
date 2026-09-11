@@ -452,6 +452,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-right: 1px solid var(--border);
 }
 #hist-panel.hidden { display: none; }
+#hist-panel.hidden + #split-history { display: none; }
 #hist-head {
   flex: 0 0 auto;
   display: flex;
@@ -675,7 +676,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 /* file-history split: graph on the left, the file's diff on the right */
 #graphpane.hist-split { flex-direction: row; }
-#graphpane.hist-split > /* gear + column-visibility rules (classes live on #graphpane) */
+/* gear + column-visibility rules (classes live on #graphpane) */
 .ch-msg { display: flex; align-items: center; gap: 8px; }
 .ch-msg .ch-lbl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 #col-gear {
@@ -729,9 +730,15 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .ctxitem .ctxtick { flex: 0 0 12px; color: var(--accent); font-weight: 700; }
 .ctxitem.checkable:hover .ctxtick { color: #0a0a12; }
 
-#scroll { flex: 1 1 44%; min-width: 0; }
+#split-graph-code { display: none; touch-action: none; }
+#graphpane.hist-split > #split-graph-code { display: block; }
+#split-graph-code:focus-visible { outline: 1px solid var(--accent); background: var(--accent); }
+#graphpane.hist-split > #scroll {
+  flex: var(--history-graph-share, 44) 1 0;
+  min-width: 0;
+}
 #graphpane.hist-split > #diffview {
-  flex: 1 1 56%;
+  flex: calc(100 - var(--history-graph-share, 44)) 1 0;
   min-width: 0;
   border-left: 1px solid var(--border);
 }
@@ -1080,6 +1087,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 #diffview-head {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -1109,6 +1117,43 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   line-height: 1.5;
   background: var(--bg);
 }
+#diff-main.with-worktree > #diffview-body { flex: 1 1 0; min-width: 0; }
+#worktree-view {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 50%;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+}
+#worktree-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+#worktree-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#worktree-body { flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 Consolas, monospace; }
+#worktree-body .worktree-message { padding: 12px; white-space: pre-wrap; }
+#worktree-head { flex-wrap: wrap; }
+#worktree-body:has(#worktree-edit-wrap) { overflow: hidden; }
+#worktree-edit-wrap { display: flex; height: 100%; min-width: 0; }
+#worktree-edit-numbers {
+  flex: 0 0 auto; margin: 0; padding: 12px 8px; overflow: hidden;
+  font: inherit; text-align: right; color: var(--muted); background: var(--bg2);
+  border-right: 1px solid var(--border); user-select: none;
+}
+#worktree-edit-code { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+#worktree-editor, #worktree-edit-highlight {
+  position: absolute; top: 0; left: 0; box-sizing: border-box;
+  width: 100%; height: 100%; margin: 0; border: 0; padding: 12px;
+  font: inherit; letter-spacing: normal; white-space: pre; tab-size: 4;
+}
+#worktree-edit-highlight { overflow: hidden; pointer-events: none; background: var(--bg); color: var(--fg); }
+#worktree-editor { resize: none; outline: none; overflow: auto; background: transparent; color: transparent; caret-color: var(--fg); }
+#worktree-editor::selection { background: rgba(56, 139, 253, 0.4); color: transparent; }
 #diff-minimap {
   flex: 0 0 14px;
   position: relative;
@@ -1383,7 +1428,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .hist-meta { flex: 0 0 auto; color: var(--muted); }
 
 /* blame view */
-.dv-btns { display: flex; gap: 6px; }
+.dv-btns { display: flex; flex-wrap: wrap; gap: 6px; }
 .bl { display: flex; cursor: pointer; font-family: Consolas, monospace; font-size: 12px; line-height: 1.5; }
 .bl:hover { background: var(--bg2); }
 .bl .bl-meta {

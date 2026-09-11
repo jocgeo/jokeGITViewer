@@ -1,6 +1,7 @@
 import { splitHunkPatches, buildLinePatch } from "./diff/staging-patches";
 import { buildCpPatch } from "./diff/cherry-pick-patches";
 import { parseDiffEntries } from "./diff/entries";
+import { functionSourceRange, replaceSourceRange } from "./function-source";
 import { intraline, renderUnifiedDiff } from "./diff/render";
 import type { RefInfo, FileChange, StashEntry, RepoData, GNode, Placed, Tab } from "./models";
 import hljs, { langForFile, hlLines, hlLine } from "./highlighting";
@@ -138,7 +139,8 @@ function setupSplitter(id: string, panelId: string, side: "left" | "right") {
     const move = (ev: MouseEvent) => {
       const r = panel.getBoundingClientRect();
       let w = side === "left" ? ev.clientX - r.left : r.right - ev.clientX;
-      w = Math.max(140, Math.min(700, w));
+      const maxWidth = id === "split-worktree" ? Math.max(140, (panel.parentElement?.clientWidth ?? 840) - 160) : 700;
+      w = Math.max(140, Math.min(maxWidth, w));
       panel.style.flex = `0 0 ${w}px`;
       schedulePaint();
     };
@@ -150,6 +152,70 @@ function setupSplitter(id: string, panelId: string, side: "left" | "right") {
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
+  });
+}
+
+function setupGraphCodeSplitter() {
+  const splitter = $("split-graph-code");
+  const pane = $("graphpane");
+  const key = "jkt.historyGraphShare";
+  let share = 44;
+  let pointer: number | null = null;
+  let previousSelect = "";
+  let previousCursor = "";
+  const apply = (value: number) => {
+    share = Math.max(10, Math.min(90, value));
+    pane.style.setProperty("--history-graph-share", String(share));
+    splitter.setAttribute("aria-valuenow", String(Math.round(share)));
+    schedulePaint();
+  };
+  const save = () => {
+    try { localStorage.setItem(key, String(share)); } catch { /* optional preference */ }
+  };
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored !== null && Number.isFinite(Number(stored))) share = Number(stored);
+  } catch { /* use default if storage is unavailable */ }
+  splitter.setAttribute("aria-valuemin", "10");
+  splitter.setAttribute("aria-valuemax", "90");
+  apply(share);
+  splitter.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || pointer !== null) return;
+    e.preventDefault();
+    pointer = e.pointerId;
+    splitter.setPointerCapture(pointer);
+    previousSelect = document.body.style.userSelect;
+    previousCursor = document.body.style.cursor;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    splitter.classList.add("dragging");
+  });
+  splitter.addEventListener("pointermove", (e) => {
+    if (e.pointerId !== pointer) return;
+    const rect = pane.getBoundingClientRect();
+    const width = rect.width - splitter.offsetWidth;
+    if (width > 0) apply(100 * (e.clientX - rect.left - splitter.offsetWidth / 2) / width);
+  });
+  const finish = () => {
+    if (pointer === null) return;
+    const id = pointer;
+    pointer = null;
+    if (splitter.hasPointerCapture(id)) splitter.releasePointerCapture(id);
+    document.body.style.userSelect = previousSelect;
+    document.body.style.cursor = previousCursor;
+    splitter.classList.remove("dragging");
+    save();
+  };
+  splitter.addEventListener("pointerup", finish);
+  splitter.addEventListener("pointercancel", finish);
+  splitter.addEventListener("lostpointercapture", finish);
+  window.addEventListener("blur", finish);
+  splitter.addEventListener("dblclick", () => { apply(44); save(); });
+  splitter.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    apply(share + (e.key === "ArrowLeft" ? -2 : 2));
+    save();
   });
 }
 
@@ -171,6 +237,45 @@ function linkScroll(ids: string[]) {
       requestAnimationFrame(() => (lock = false));
     });
   }
+}
+
+let alignWorktreeScroll: (() => void) | null = null;
+function setupWorktreeScrollLock() {
+  const history = $("diffview-body");
+  const worktree = $("worktree-body");
+  const button = $("worktree-scroll-lock");
+  let enabled = true;
+  const pending = new WeakMap<HTMLElement, { top: number; left: number }>();
+  const currentPane = () => document.getElementById("worktree-editor") ?? worktree;
+  const sync = (source: HTMLElement, force = false) => {
+    if (!enabled || $("worktree-view").classList.contains("hidden")) return;
+    const expected = pending.get(source);
+    pending.delete(source);
+    if (!force && expected && Math.abs(source.scrollTop - expected.top) < 1 &&
+        Math.abs(source.scrollLeft - expected.left) < 1) return;
+    const current = currentPane();
+    if (source !== history && source !== current) return;
+    const target = source === history ? current : history;
+    // Different revisions may contain different numbers of lines. Preserve
+    // relative vertical position so both panes can still reach the end.
+    const max = source.scrollHeight - source.clientHeight;
+    const top = max > 0 ? source.scrollTop / max * Math.max(0, target.scrollHeight - target.clientHeight) : 0;
+    target.scrollTop = top;
+    target.scrollLeft = source.scrollLeft;
+    // Ignore the programmatic scroll event without blocking subsequent user
+    // input; the textarea's own listener still updates colors and line numbers.
+    pending.set(target, { top: target.scrollTop, left: target.scrollLeft });
+  };
+  history.addEventListener("scroll", () => sync(history), { passive: true });
+  // Capture also receives scroll events from editors created after setup.
+  worktree.addEventListener("scroll", e => sync(e.target as HTMLElement), { capture: true, passive: true });
+  alignWorktreeScroll = () => sync(history, true);
+  button.addEventListener("click", () => {
+    enabled = !enabled;
+    button.textContent = `Scroll lock: ${enabled ? "on" : "off"}`;
+    button.setAttribute("aria-pressed", String(enabled));
+    if (enabled) alignWorktreeScroll?.();
+  });
 }
 
 function showBranchDropMenu(
@@ -2193,6 +2298,7 @@ interface HistEntry {
   summary: string;
   added: number;
   deleted: number;
+  diff?: string | null;
 }
 
 async function showFileHistory() {
@@ -2208,6 +2314,7 @@ async function showFileHistory() {
   fileHistoryHL = new Set(hist.map((h) => h.hash));
   fileHistoryNum = new Map(hist.map((h) => [h.hash, { a: h.added, d: h.deleted }]));
   histLineRange = null; // whole-file history, not a line range
+  histFunctionName = null;
   // back to the full graph; highlight applies there
   showDiffView(false);
   const t = cur();
@@ -2221,6 +2328,7 @@ let histEntries: HistEntry[] = [];
 let histFile = "";
 let histIdx = -1;
 let histLineRange: { start: number; end: number } | null = null; // line-history label
+let histFunctionName: string | null = null;
 
 // line range covered by the current text selection inside the file view,
 // read from the data-ln attributes on the rows (diff / plain / blame)
@@ -2264,6 +2372,7 @@ async function showLineHistory(start: number, end: number) {
   fileHistoryHL = new Set(hist.map((h) => h.hash));
   fileHistoryNum = new Map(); // no per-commit line counts for a range
   histLineRange = { start, end };
+  histFunctionName = null;
   showDiffView(false);
   const t = cur();
   if (t) renderGraph(t);
@@ -2275,6 +2384,37 @@ async function showLineHistory(start: number, end: number) {
   );
 }
 
+async function showFunctionHistory(initialName = "") {
+  if (!diffCtx) return;
+  const context = diffCtx;
+  const tab = cur();
+  const name = await promptModal("History of function", "Function name, e.g. check_hv_data_freeze", initialName);
+  if (!name || diffCtx !== context || cur() !== tab) return;
+  const { path, file, hash } = context;
+  setStatus(`loading history of function ${name}…`);
+  try {
+    const hist = await invoke<HistEntry[]>("file_function_history", {
+      path, file, name, rev: hash ?? "",
+    });
+    if (diffCtx !== context || cur() !== tab) return;
+    fileHistoryHL = new Set(hist.map((h) => h.hash));
+    fileHistoryNum = new Map();
+    histLineRange = null;
+    histFunctionName = name;
+    $("detail").classList.add("collapsed");
+    showDiffView(false);
+    if (tab) renderGraph(tab);
+    renderHistPanel(file, hist);
+    setStatus(`${hist.length} commit(s) changed function ${name}`);
+  } catch (e) {
+    if (diffCtx !== context || cur() !== tab) return;
+    setStatus("");
+    errorModal("Function history failed:\n" + String(e) +
+      "\n\nUse the function name without parentheses. Git must recognize its definition in this revision" +
+      (hash ? "." : " at HEAD; uncommitted functions do not have history yet."));
+  }
+}
+
 // left-of-graph column listing every commit that touched the file; clicking
 // one shows that commit's diff of the file in the center (fast click-through)
 function renderHistPanel(file: string, hist: HistEntry[]) {
@@ -2282,10 +2422,15 @@ function renderHistPanel(file: string, hist: HistEntry[]) {
   histFile = file;
   histIdx = -1;
   const lr = histLineRange;
-  $("hist-title").innerHTML = lr
+  const fn = histFunctionName;
+  $("hist-title").innerHTML = fn
+    ? `ƒ <b>${escapeHtml(basename(file))}</b> · ${escapeHtml(fn)} · ${hist.length}`
+    : lr
     ? `📏 <b>${escapeHtml(basename(file))}</b> · L${lr.start}–${lr.end} · ${hist.length}`
     : `📄 <b>${escapeHtml(basename(file))}</b> · ${hist.length}`;
-  ($("hist-title") as HTMLElement).title = lr
+  ($("hist-title") as HTMLElement).title = fn
+    ? `${file} — history of function ${fn}`
+    : lr
     ? `${file} — history of lines ${lr.start}–${lr.end}`
     : file;
   const ul = $("hist-list");
@@ -2296,7 +2441,7 @@ function renderHistPanel(file: string, hist: HistEntry[]) {
     li.className = "hist-item";
     li.dataset.idx = String(i);
     // line-range history has no meaningful per-commit +/- counts
-    const ns = lr
+    const ns = lr || fn
       ? ""
       : h.added < 0 || h.deleted < 0
         ? `<span class="ns-bin">bin</span>`
@@ -2337,7 +2482,8 @@ function openHistEntry(i: number) {
     t.repo.path,
     histFile,
     h.hash,
-    true
+    true,
+    histFunctionName && h.diff != null ? { name: histFunctionName, diff: h.diff } : undefined
   );
   // highlight + scroll the graph to the commit so both views stay in sync
   paintViewport();
@@ -2392,6 +2538,7 @@ function clearFileHistory() {
   histIdx = -1;
   histLineRange = null;
   histSplit = false; // leave the split so the graph goes full-width again
+  histFunctionName = null;
   $("hist-filter").classList.add("hidden");
   $("hist-panel").classList.add("hidden");
   setStatus(""); // drop any "loading history…" message
@@ -2877,7 +3024,19 @@ async function refreshCommitFiles() {
 // open a file diff in the MAIN center area (line numbers + highlighting)
 // split mode: keep the graph visible NEXT to the diff (file-history browsing)
 let histSplit = false;
+function restoreGraphLayout() {
+  if (!gctx) return;
+  // Background refreshes can render while the headers are display:none,
+  // where their measured offset is zero. Measure again after revealing them.
+  const graphLeft = graphColumnLeft();
+  gctx.graphLeft = graphLeft;
+  $("graph-svg").style.left = `${graphLeft}px`;
+  $("graphpane").style.setProperty("--graph-left", `${graphLeft}px`);
+  paintViewport();
+}
+
 function showDiffView(on: boolean) {
+  syncWorktreeView(on);
   openFileStamp = ""; // re-baseline: a different file isn't an edit
   $("mergeview").classList.add("hidden");
   $("diffview").classList.toggle("hidden", !on);
@@ -2886,13 +3045,16 @@ function showDiffView(on: boolean) {
   // in split mode the graph + headers stay visible beside the diff
   $("col-headers").classList.toggle("hidden", on && !split);
   $("scroll").classList.toggle("hidden", on && !split);
+  if (!on || split) restoreGraphLayout();
   dvfClose(); // view content changes — stale find results would mislead
 }
 function showMergeView(on: boolean) {
+  syncWorktreeView(false);
   $("diffview").classList.add("hidden");
   $("mergeview").classList.toggle("hidden", !on);
   $("col-headers").classList.toggle("hidden", on);
   $("scroll").classList.toggle("hidden", on);
+  if (!on) restoreGraphLayout();
 }
 
 // ---- merge conflict resolution ----
@@ -3338,7 +3500,179 @@ function isImage(file: string): boolean {
   return /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/i.test(file);
 }
 
-let diffCtx: { path: string; file: string; hash: string | null } | null = null;
+interface FunctionView { name: string; diff: string; whole?: boolean }
+interface WorktreeView {
+  path: string; file: string; name?: string;
+  source?: string; range?: { start: number; end: number }; draft?: string; saving?: boolean;
+}
+let worktreeView: WorktreeView | null = null;
+const worktreeDrafts = new Map<string, WorktreeView>();
+const worktreeKey = (view: WorktreeView) => JSON.stringify([view.path, view.file, view.name]);
+let worktreeRequest = 0;
+
+function closeWorktreeView() {
+  worktreeView = null;
+  worktreeRequest++;
+  $("worktree-view").classList.add("hidden");
+  $("split-worktree").classList.add("hidden");
+  $("diff-main").classList.remove("with-worktree");
+}
+
+function syncWorktreeView(on: boolean) {
+  if (worktreeView && (!on || !diffCtx || diffCtx.path !== worktreeView.path || diffCtx.file !== worktreeView.file || diffCtx.functionView?.name !== worktreeView.name)) {
+    closeWorktreeView();
+  }
+}
+
+async function openCurrentWorktree() {
+  if (!diffCtx) return;
+  const { path, file } = diffCtx;
+  const name = diffCtx.functionView?.name;
+  const context = worktreeView = worktreeDrafts.get(worktreeKey({ path, file, name })) ?? { path, file, name };
+  const request = ++worktreeRequest;
+  $("diff-main").classList.add("with-worktree");
+  $("worktree-view").classList.remove("hidden");
+  $("split-worktree").classList.remove("hidden");
+  $("worktree-title").textContent = `${file}${name ? ` · ${name}` : ""} — current worktree`;
+  for (const id of ["worktree-modify", "worktree-save", "worktree-cancel"]) $(id).classList.add("hidden");
+  $("worktree-title").title = `${path} / ${file}`;
+  const body = $("worktree-body");
+  body.innerHTML = '<div class="worktree-message">Loading current file…</div>';
+  const current = () => request === worktreeRequest && worktreeView === context &&
+    diffCtx?.path === path && diffCtx.file === file;
+  try {
+    if (context.draft !== undefined) { editCurrentWorktree(); return; }
+    if (isImage(file)) {
+      const url = await invoke<string>("blob_data_url", { path, file, rev: "" });
+      if (!current()) return;
+      body.innerHTML = `<div class="imgwrap"><img src="${escapeHtml(url)}" alt="Current working-tree file" /></div>`;
+    } else {
+      const content = await invoke<string>("file_at_commit", { path, file, hash: "" });
+      if (!current()) return;
+      context.range = name ? functionSourceRange(content, name) : { start: 0, end: content.length };
+      context.source = content;
+      const selected = content.slice(context.range.start, context.range.end);
+      const firstLine = content.slice(0, context.range.start).split('\n').length;
+      const lines = selected.replace(/\r\n/g, "\n").split("\n");
+      if (lines[lines.length - 1] === "") lines.pop();
+      const highlighted = hlLines(lines, langForFile(file));
+      body.innerHTML = lines.length
+        ? `<div class="plainview" style="counter-reset: plainln ${firstLine - 1}">${highlighted.map((html, i) =>
+          `<div class="pl" data-ln="${firstLine + i}"><span class="plc">${html || "&nbsp;"}</span></div>`
+        ).join("")}</div>`
+        : '<div class="worktree-message">(empty file)</div>';
+      $("worktree-modify").classList.remove("hidden");
+    }
+    body.scrollTop = 0;
+    alignWorktreeScroll?.();
+  } catch (e) {
+    if (!current()) return;
+    body.innerHTML = `<div class="worktree-message">Could not open this file in the current worktree. It may have been moved or deleted.\n\n${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function editCurrentWorktree() {
+  const view = worktreeView;
+  if (!view || view.source === undefined || !view.range) return;
+  $("worktree-body").innerHTML =
+    '<div id="worktree-edit-wrap"><pre id="worktree-edit-numbers" aria-hidden="true"></pre>' +
+    '<div id="worktree-edit-code"><pre id="worktree-edit-highlight" aria-hidden="true"></pre>' +
+    '<textarea id="worktree-editor" aria-label="Edit current working-tree code" spellcheck="false" wrap="off"></textarea></div></div>';
+  const editor = $("worktree-editor") as HTMLTextAreaElement;
+  editor.value = view.draft ?? view.source.slice(view.range.start, view.range.end);
+  editor.readOnly = !!view.saving;
+  setupWorktreeEditHighlight(view.source.slice(0, view.range.start).split('\n').length, langForFile(view.file));
+  alignWorktreeScroll?.();
+  editor.addEventListener("input", () => {
+    view.draft = editor.value;
+    worktreeDrafts.set(worktreeKey(view), view);
+  });
+  editor.addEventListener("keydown", e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault(); e.stopPropagation(); void saveCurrentWorktree();
+    }
+  });
+  $("worktree-modify").classList.add("hidden");
+  $("worktree-save").classList.remove("hidden");
+  $("worktree-cancel").classList.remove("hidden");
+  editor.focus();
+}
+
+function setupWorktreeEditHighlight(firstLine: number, lang: string | null) {
+  const editor = $("worktree-editor") as HTMLTextAreaElement;
+  const highlight = $("worktree-edit-highlight");
+  const numbers = $("worktree-edit-numbers");
+  const sync = () => {
+    // Match the textarea's inner viewport, excluding its native scrollbars.
+    highlight.style.width = `${editor.clientWidth}px`;
+    highlight.style.height = `${editor.clientHeight}px`;
+    highlight.scrollTop = editor.scrollTop;
+    highlight.scrollLeft = editor.scrollLeft;
+    numbers.scrollTop = editor.scrollTop;
+  };
+  const paint = () => {
+    const lines = editor.value.split('\n');
+    highlight.innerHTML = hlLines(lines, lang).join('\n') + '\n ';
+    numbers.textContent = lines.map((_, i) => String(firstLine + i)).join('\n') + '\n ';
+    sync();
+  };
+  let queued = false;
+  editor.addEventListener("input", () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      if (editor.isConnected) paint();
+    });
+  });
+  editor.addEventListener("scroll", sync);
+  // Resizing the side-by-side panes must keep the overlay aligned too.
+  const resize = new ResizeObserver(() => {
+    if (!editor.isConnected) { resize.disconnect(); return; }
+    sync();
+  });
+  resize.observe(editor);
+  paint();
+}
+
+async function saveCurrentWorktree() {
+  const view = worktreeView;
+  const editor = document.getElementById("worktree-editor") as HTMLTextAreaElement | null;
+  if (!view || !editor || view.source === undefined || !view.range || view.saving) return;
+  const draft = editor.value;
+  view.draft = draft;
+  worktreeDrafts.set(worktreeKey(view), view);
+  view.saving = true;
+  editor.readOnly = true;
+  try {
+    const content = replaceSourceRange(view.source, view.range, draft);
+    await invoke("write_file_worktree", { path: view.path, file: view.file, content, expectedContent: view.source });
+    worktreeDrafts.delete(worktreeKey(view));
+    view.draft = undefined;
+    if (worktreeView === view) await openCurrentWorktree();
+    setStatus("Saved changes to the working tree");
+  } catch (e) {
+    errorModal(String(e));
+  } finally {
+    view.saving = false;
+    editor.readOnly = false;
+    if (worktreeView === view) {
+      const activeEditor = document.getElementById("worktree-editor") as HTMLTextAreaElement | null;
+      if (activeEditor) activeEditor.readOnly = false;
+    }
+  }
+}
+
+async function reloadCurrentWorktree() {
+  const view = worktreeView;
+  if (!view || view.saving) return;
+  if (view.draft !== undefined && !(await confirmModal("Discard the unsaved worktree edit and reload the file?"))) return;
+  if (worktreeView !== view) return;
+  worktreeDrafts.delete(worktreeKey(view));
+  await openCurrentWorktree();
+}
+
+let diffCtx: { path: string; file: string; hash: string | null; functionView?: FunctionView } | null = null;
 let lastView: (() => void) | null = null; // re-render the view before blame
 let blameOn = false;
 function setBlameBtn(on: boolean) {
@@ -3693,12 +4027,13 @@ async function openDiff(
   path: string,
   file: string,
   hash: string | null,
-  split = false // keep the graph visible beside the diff (file-history mode)
+  split = false, // keep the graph visible beside the diff (file-history mode)
+  functionView?: FunctionView
 ) {
   histSplit = split;
-  diffCtx = { path, file, hash };
+  const context = diffCtx = { path, file, hash, functionView };
   wipDiffCtx = null; // this is a commit/compare diff, not the WIP staging view
-  lastView = () => openDiff(title, path, file, hash, split);
+  lastView = () => openDiff(title, path, file, hash, split, functionView);
   setBlameBtn(false);
   setPlainBtn(false);
   setEditBtn(false);
@@ -3712,17 +4047,23 @@ async function openDiff(
   body.innerHTML = "<div class='dl ctx'><span class='dc'>loading…</span></div>";
   showDiffView(true);
   try {
-    const diff = hash
-      ? await invoke<string>("commit_diff", { path, hash, file, full: diffFull })
+    const diff = functionView && !functionView.whole
+      ? functionView.diff
+      : hash
+      ? await invoke<string>("commit_diff", { path, hash, file, full: functionView ? true : diffFull })
       : await invoke<string>("wip_diff", { path, file });
-    showDiffText(title, diff);
+    if (diffCtx !== context) return;
+    showDiffText(functionView && !functionView.whole ? `${title} · ${functionView.name}` : title, diff);
     if (hash) {
       // toggle between changed hunks and the whole file
       const wb = $("diffview-whole");
       wb.classList.remove("hidden");
-      wb.textContent = diffFull ? "Hunks only" : "Whole file";
+      wb.textContent = functionView
+        ? functionView.whole ? "Function only" : "Whole file"
+        : diffFull ? "Hunks only" : "Whole file";
     }
   } catch (e) {
+    if (diffCtx !== context) return;
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
     $("diff-minimap").innerHTML = "";
   }
@@ -5657,6 +5998,12 @@ window.addEventListener("DOMContentLoaded", () => {
   $("c-amend").addEventListener("change", updateCommitEnabled);
   $("c-summary").addEventListener("input", updateCommitEnabled);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
+  $("diffview-worktree").addEventListener("click", () => void openCurrentWorktree());
+  $("worktree-refresh").addEventListener("click", () => void reloadCurrentWorktree());
+  $("worktree-modify").addEventListener("click", editCurrentWorktree);
+  $("worktree-save").addEventListener("click", () => void saveCurrentWorktree());
+  $("worktree-cancel").addEventListener("click", () => void reloadCurrentWorktree());
+  $("worktree-close").addEventListener("click", closeWorktreeView);
   $("diffview-blame").addEventListener("click", () => {
     if (blameOn) lastView?.(); // back to the diff/content view
     else showBlame();
@@ -5669,21 +6016,29 @@ window.addEventListener("DOMContentLoaded", () => {
   $("diffview-copy").addEventListener("click", () => void copyPlainFile());
   $("diffview-modify").addEventListener("click", () => void toggleEditFile());
   $("diffview-save").addEventListener("click", () => void saveEditedFile());
-  // right-click a text selection in the file view -> history of those lines
+  // Function history is available on code rows even without a line selection.
   $("diffview-body").addEventListener("contextmenu", (e) => {
     if (!diffCtx) return;
     const range = selectedLineRange();
-    if (!range) return; // no selection -> let the native menu (copy) show
+    const row = (e.target as HTMLElement).closest<HTMLElement>("[data-ln]");
+    if (!range && !row) return;
     e.preventDefault();
     const label =
-      range.start === range.end
-        ? `History of line ${range.start}`
-        : `History of lines ${range.start}–${range.end}`;
+      range?.start === range?.end
+        ? `History of line ${range?.start}`
+        : `History of lines ${range?.start}–${range?.end}`;
     const sel = window.getSelection()?.toString() ?? "";
+    // A selected identifier is the strongest hint. On a declaration row,
+    // highlight.js marks the function title for us without parsing code again.
+    const selectedName = sel.trim();
+    const initialName = /^[A-Za-z_$][\w$]*$/.test(selectedName)
+      ? selectedName
+      : row?.querySelector(".hljs-title.function_, .hljs-title")?.textContent ?? "";
     showMenu(e.clientX, e.clientY, [
-      { label, action: () => void showLineHistory(range.start, range.end) },
+      ...(range ? [{ label, action: () => void showLineHistory(range.start, range.end) }] : []),
+      { label: "History of function…", action: () => void showFunctionHistory(initialName) },
       { separator: true },
-      { label: "Copy", action: () => void navigator.clipboard.writeText(sel).catch(() => {}) },
+      { label: "Copy", action: () => void navigator.clipboard.writeText(sel || row?.querySelector(".dc, .plc")?.textContent || "").catch(() => {}) },
     ]);
   });
   $("diffview-whole").addEventListener("click", () => {
@@ -5693,6 +6048,12 @@ window.addEventListener("DOMContentLoaded", () => {
       const c = wipDiffCtx;
       wipFull = !wipFull;
       void openWipDiff(c.path, c.file, c.staged).then(restore);
+    } else if (diffCtx?.hash && diffCtx.functionView) {
+      const { path, file, hash, functionView } = diffCtx;
+      const title = `${basename(file)} @ ${hash.slice(0, 8)}`;
+      void openDiff(title, path, file, hash, histSplit, {
+        ...functionView, whole: !functionView.whole,
+      }).then(restore);
     } else if (diffCtx?.hash) {
       const { path, file, hash } = diffCtx;
       const title = $("diffview-title").textContent ?? file;
@@ -5747,6 +6108,10 @@ window.addEventListener("DOMContentLoaded", () => {
   linkScroll(["mv-ours-code", "mv-theirs-code", "mv-result", "mv-output"]);
   setupSplitter("split-left", "sidebar", "left");
   setupSplitter("split-right", "detail", "right");
+  setupSplitter("split-history", "hist-panel", "left");
+  setupSplitter("split-worktree", "worktree-view", "right");
+  setupGraphCodeSplitter();
+  setupWorktreeScrollLock();
   $("d-tree-toggle").addEventListener("click", () => {
     filesTreeMode = !filesTreeMode;
     $("d-tree-toggle").textContent = filesTreeMode ? "Flat" : "Tree";
