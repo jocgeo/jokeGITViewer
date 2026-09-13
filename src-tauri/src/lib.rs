@@ -9,6 +9,8 @@ mod recovery;
 mod remotes;
 mod remote_manager;
 mod worktrees;
+mod requests;
+mod git_lock;
 
 #[derive(Serialize)]
 pub struct Commit {
@@ -2392,7 +2394,12 @@ pub fn run() {
             blame,
             file_history,
             file_line_history,
-            file_function_history
+            file_function_history,
+            git_lock::remove_index_lock,
+            requests::request_targets,
+            requests::request_connect,
+            requests::request_disconnect,
+            requests::request_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -42,7 +42,7 @@ export function promptModal(
   });
 }
 
-export function errorModal(msg: string) {
+export function errorModal(msg: string, action?: { label: string; run: () => Promise<boolean | void> }) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML =
@@ -53,6 +53,18 @@ export function errorModal(msg: string) {
     `</div>`;
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
+  if (action) {
+    const button = document.createElement("button");
+    button.className = "danger";
+    button.textContent = action.label;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { if (await action.run()) close(); }
+      catch (e) { errorModal(String(e)); }
+      finally { button.disabled = false; }
+    });
+    overlay.querySelector(".modal-btns")?.prepend(button);
+  }
   const ok = overlay.querySelector(".modal-ok") as HTMLButtonElement | null;
   ok?.addEventListener("click", close);
   ok?.focus();
@@ -118,4 +130,3 @@ export function confirmModal(title: string): Promise<boolean> {
     });
   });
 }
-

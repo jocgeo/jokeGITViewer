@@ -1,13 +1,14 @@
 import { splitHunkPatches, buildLinePatch } from "./diff/staging-patches";
 import { buildCpPatch } from "./diff/cherry-pick-patches";
 import { parseDiffEntries } from "./diff/entries";
+import { showRequests } from "./requests";
 import { functionSourceRange, replaceSourceRange } from "./function-source";
 import { intraline, renderUnifiedDiff } from "./diff/render";
 import type { RefInfo, FileChange, StashEntry, RepoData, GNode, Placed, Tab } from "./models";
 import hljs, { langForFile, hlLines, hlLine } from "./highlighting";
 import { escapeHtml } from "./html";
 import { WIP_ID, STASH_COLOR, WIP_COLOR, COLORS, refKey, buildNodes, layout } from "./graph-model";
-import { promptModal, errorModal, choiceModal, confirmModal } from "./ui/dialogs";
+import { promptModal, errorModal as showErrorModal, choiceModal, confirmModal } from "./ui/dialogs";
 import { showMenu, closeMenu } from "./ui/context-menu";
 import type { MenuItem } from "./ui/context-menu";
 import { invoke } from "@tauri-apps/api/core";
@@ -18,6 +19,19 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+function errorModal(msg: string) {
+  const path = cur()?.repo.path;
+  const lock = /Unable to create '([^'\r\n]*[\\/]index\.lock)': File exists/i.exec(msg)?.[1];
+  showErrorModal(msg, path && lock ? {
+    label: "Force remove Git lock…",
+    run: async () => {
+      if (!(await confirmModal(`Force remove ${lock}?\n\nFirst stop any Git operation or commit editor using this repository. Removing a lock while Git is running can corrupt the index. Only index.lock will be removed.`))) return;
+      const removed = await invoke<boolean>("remove_index_lock", { path, expectedLock: lock });
+      setStatus(removed ? "Git index lock removed. Retry your operation." : "Git index lock is already gone. Retry your operation.");
+      return true;
+    }
+  } : undefined);
+}
 // ---- layout constants ----
 const ROW_H = 30;
 const PAD = 14;
@@ -673,6 +687,7 @@ function renderActive() {
   updateStatusBar(t);
   if (!t) {
     $("repo-path").textContent = "No repo open";
+    showRequests(null);
     setStatus("");
     $("locals").innerHTML = "";
     $("remotes").innerHTML = "";
@@ -719,6 +734,7 @@ function renderActive() {
 }
 
 function renderSidebar(t: Tab) {
+  showRequests(t.repo.path);
   const repo = t.repo;
   const localNames = new Set(
     repo.refs.filter((r) => r.kind === "local").map((r) => r.name)

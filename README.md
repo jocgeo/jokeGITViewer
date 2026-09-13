@@ -31,6 +31,22 @@ bundled libgit2, no heavy runtime. Small binary, native window.
   fetched in the background so incoming pushes just appear
 
 ### Repositories, branches & submodules
+- **Pull / merge requests** in the left sidebar: choose a remote to see all its
+  open GitHub PRs or GitLab MRs, including drafts. **For me** shows requests you
+  authored, are assigned to, or were directly requested to review; team/group
+  reviewer membership is not expanded. Click a request to open its hosting page in your browser.
+- Public repositories can be browsed without a token. Use **Connect** for private
+  repositories and personal lists: GitHub accepts a personal token with repository
+  **Pull requests: Read** permission (or an appropriate classic token); GitLab
+  accepts a personal token with **read_api**. Tokens are kept only in backend
+  memory for the current app session, shared across repositories on the same
+  provider/host. **Disconnect** removes that host's token. Reconnect after restart.
+- GitHub.com and GitLab.com are detected automatically. For GitHub Enterprise
+  Server or self-managed GitLab, select the provider explicitly. HTTPS API access
+  and standard root-hosted API paths are required. Other hosting providers are
+  not implemented yet. Requests refresh every two minutes while the app is visible,
+  or on demand. The lists apply to the selected remote's project, not every project
+  belonging to the account; select an upstream remote when reviewing a fork's PRs.
 - **Multiple repos in tabs** — reorder by drag & drop, session restored on start
 - **Submodules** in the sidebar: open one as its own tab, breadcrumbed to its parent
 - Submodule badges show uninitialized checkouts, local modifications (including
