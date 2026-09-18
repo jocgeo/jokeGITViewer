@@ -3000,6 +3000,10 @@ async function refreshCommitFiles() {
   if (cur() !== t || cur()?.repo.path !== path) return;
   stagedCount = res.staged.length;
 
+  // `git stash push --staged` refuses a path that ALSO has worktree changes,
+  // so a partially staged file has to be stashed from both sides at once.
+  const alsoUnstaged = new Set(res.unstaged.map((f) => f.path));
+
   const buildList = (ulId: string, files: FileChange[], stage: boolean) => {
     const ul = $(ulId);
     ul.innerHTML = "";
@@ -3026,6 +3030,22 @@ async function refreshCommitFiles() {
       li.querySelector(".stagebtn")?.addEventListener("click", (e) => {
         e.stopPropagation();
         stage ? doStage(f.path) : doUnstage(f.path);
+      });
+      li.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const stagedOnly = !stage && !alsoUnstaged.has(f.path);
+        showMenu(e.clientX, e.clientY, [
+          {
+            label: stagedOnly
+              ? `Stash staged changes of ${basename(f.path)}`
+              : `Stash ${basename(f.path)}`,
+            action: () =>
+              runAction(
+                invoke("stash_file", { path, file: f.path, stagedOnly }),
+                `Stashed ${f.path}`
+              ),
+          },
+        ]);
       });
       ul.appendChild(li);
     });

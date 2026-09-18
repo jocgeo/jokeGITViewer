@@ -1694,6 +1694,22 @@ async fn stash_drop(path: String, selector: String) -> Result<(), String> {
     git(&path, &["stash", "drop", &selector]).map(|_| ())
 }
 
+// Stash ONE file instead of the whole working tree.
+//
+// staged_only uses `--staged`, which takes just the index side. git rejects
+// it for a path that also has worktree changes ("Cannot remove worktree
+// changes") and leaves a half-finished stash behind, so the caller passes
+// false for a partially staged file and both sides go in together.
+//
+// --include-untracked is what makes a brand-new file stashable at all; it is
+// pathspec-scoped, so nothing outside `file` is touched. It cannot be combined
+// with --staged, and an index entry never needs it.
+#[tauri::command]
+async fn stash_file(path: String, file: String, staged_only: bool) -> Result<(), String> {
+    let mode = if staged_only { "--staged" } else { "--include-untracked" };
+    git(&path, &["stash", "push", mode, "--", &file]).map(|_| ())
+}
+
 #[tauri::command]
 async fn create_branch_checkout(path: String, name: String) -> Result<(), String> {
     git(&path, &["checkout", "-b", &name]).map(|_| ())
@@ -2369,6 +2385,7 @@ pub fn run() {
             stash_apply,
             stash_pop_at,
             stash_drop,
+            stash_file,
             conflict_versions,
             resolve_take,
             resolve_write,
