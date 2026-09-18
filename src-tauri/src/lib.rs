@@ -2356,7 +2356,6 @@ pub fn run() {
             remotes::remote_choices,
             remote_manager::remote_settings,
             submodule_ready,
-            worktrees::worktree_switch,
             worktrees::worktree_list,
             worktrees::worktree_cleanup,
             update_submodule,

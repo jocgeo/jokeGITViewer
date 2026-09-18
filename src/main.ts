@@ -3790,7 +3790,7 @@ async function toggleEditFile() {
   }
   let { path } = diffCtx;
   const { file, hash } = diffCtx;
-  // Editing a file from a commit: open its worktree first, so the edit is
+  // Editing a file from a commit: check that state out first, so the edit is
   // made on top of the state it belongs to (not mixed into whatever is
   // currently checked out).
   if (hash) {
@@ -3816,23 +3816,24 @@ async function toggleEditFile() {
       const ok = await confirmModal(
         local
           ? `Check out branch "${target}" (at ${hash.slice(0, 8)}) before editing ${basename(file)}?\n\n` +
-              `Your current worktree and local changes stay in place.`
+              `Uncommitted changes are stashed first, so nothing is lost.`
           : remote
             ? `Check out "${target}" (tracking ${remote.name}) before editing ${basename(file)}?\n\n` +
                 `The local branch is created if it doesn't exist yet, so you stay on a branch ` +
-                `instead of a detached HEAD.\n\nYour current worktree and local changes stay in place.`
+                `instead of a detached HEAD.\n\nUncommitted changes are stashed first, so nothing is lost.`
             : `Check out commit ${hash.slice(0, 8)} before editing ${basename(file)}?\n\n` +
                 `No branch points at this commit, so the repo goes into DETACHED HEAD state — ` +
                 `commit to a new branch afterwards or the work is easy to lose.\n\n` +
-                `Your current worktree and local changes stay in place.`
+                `Uncommitted changes are stashed first, so nothing is lost.`
       );
       if (!ok) return;
       setStatus(`checking out ${label}…`);
       pushBusy();
       try {
-        path = await invoke<string>("worktree_switch", { path, target, upstream, create: false });
-        await loadRepo(path);
-        await reloadActive(`Opened worktree for ${label}`);
+        const stashed = await invoke<boolean>("checkout", { path, target, upstream });
+        await reloadActive(
+          stashed ? `Checked out ${label} — your changes were stashed` : `Checked out ${label}`
+        );
       } catch (e) {
         setStatus("");
         errorModal("Checkout failed — not editing:\n" + String(e));
@@ -5121,7 +5122,8 @@ async function reloadActive(statusMsg?: string) {
   }
 }
 
-// Branch navigation opens another worktree; the source index and files stay put.
+// Double-click / badge navigation — goes through doCheckout, which checks the
+// branch out into the current working directory.
 async function doCheckoutConfirm(t: Tab, target: string, upstream?: string) {
   if (cur() === t) await doCheckout(target, upstream);
 }
@@ -5347,23 +5349,40 @@ async function chatSendCurrent() {
   }
 }
 
+// A checkout moves the files in THIS working directory. Earlier builds opened a
+// separate worktree folder per branch, which left the checkout you were looking
+// at untouched — switching branch has to change the real files.
 async function doCheckout(target: string, upstream?: string, create = false) {
   const t = cur();
   if (!t) return;
   if (isBusy()) return;
-  if (editOn && editDirty()) { errorModal("Save or cancel the file editor changes before switching worktrees."); return; }
-  setStatus(`opening worktree for ${target}…`);
+  if (editOn && editDirty()) { errorModal("Save or cancel the file editor changes before switching branches."); return; }
+  // `git checkout -b` carries local changes onto the new branch, so only a real
+  // branch SWITCH has to park them first — the backend stashes them.
+  if (!create && t.repo.wip) {
+    const ok = await confirmModal(
+      `Check out ${target}?\n\n` +
+        `You have uncommitted changes. They are stashed first and stay in the ` +
+        `Stashes section, so nothing is lost — apply the stash to get them back.`
+    );
+    if (!ok) return;
+  }
+  setStatus(`checking out ${target}…`);
   pushBusy();
   try {
-    const directory = await invoke<string>("worktree_switch", {
-      path: t.repo.path,
-      target,
-      upstream: upstream ?? null,
-      create,
-    });
-    t.stale = true;
-    await loadRepo(directory);
-    await reloadActive(`Opened ${target} — changes stay in each worktree`);
+    if (create) {
+      await invoke("create_branch_checkout", { path: t.repo.path, name: target });
+      await reloadActive(`Created and checked out ${target}`);
+    } else {
+      const stashed = await invoke<boolean>("checkout", {
+        path: t.repo.path,
+        target,
+        upstream: upstream ?? null,
+      });
+      await reloadActive(
+        stashed ? `Checked out ${target} — your changes were stashed` : `Checked out ${target}`
+      );
+    }
   } catch (e) {
     setStatus("");
     errorModal("Checkout failed:\n" + String(e));
