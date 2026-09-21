@@ -77,6 +77,54 @@ pub async fn worktree_list(path: String) -> Result<Vec<Worktree>, String> {
         .map_err(|e| e.to_string())?
 }
 
+// Stash first, then let Git remove only a verified, clean linked worktree.
+fn stash_and_close(path: &str, target_path: &str) -> Result<Option<String>, String> {
+    let _lock = SWITCH.lock().map_err(|_| "Worktree operation interrupted".to_string())?;
+    let target = std::fs::canonicalize(target_path).map_err(|e| e.to_string())?;
+    let current = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    if target == current { return Err("Switch to another worktree before closing this one.".into()); }
+    let trees = list(path)?;
+    let (index, tree) = trees.iter().enumerate().find(|(_, t)| {
+        std::fs::canonicalize(&t.path).ok().as_ref() == Some(&target)
+    }).ok_or("This worktree is no longer registered in this repository.")?;
+    if index == 0 || tree.bare || tree.locked || tree.missing {
+        return Err("Cannot close the main checkout, a locked worktree, or a missing worktree.".into());
+    }
+    // Git cannot stash submodule contents; do not partially save these trees.
+    if git_ro(&tree.path, &["ls-files", "--stage", "-z"])?.split('\0').any(|s| s.starts_with("160000 ")) {
+        return Err("Worktrees containing submodules must be closed manually after saving their contents.".into());
+    }
+    let status_args = ["status", "--porcelain", "--untracked-files=all", "--ignored", "--ignore-submodules=none"];
+    let mut saved = None;
+    if !git_ro(&tree.path, &status_args)?.trim().is_empty() {
+        let before = git_ro(&tree.path, &["rev-parse", "--verify", "refs/stash"]).ok();
+        let label = if tree.branch.is_empty() { &tree.head } else { &tree.branch };
+        let message = format!("Saved work — {label} (closed worktree: {})", tree.path);
+        git(&tree.path, &["stash", "push", "--all", "-m", &message])
+            .map_err(|e| format!("Worktree retained: could not stash all changes.\n{e}"))?;
+        let after = git_ro(&tree.path, &["rev-parse", "--verify", "refs/stash"])?;
+        if before.as_deref() == Some(after.as_str()) {
+            return Err("Worktree retained: no new stash was created.".into());
+        }
+        saved = Some(after.trim().to_string());
+    }
+    let retained = |e: String| match &saved {
+        Some(hash) => format!("Changes saved in stash {hash}, but the worktree was retained.\n{e}"),
+        None => format!("Worktree retained.\n{e}"),
+    };
+    if !git_ro(&tree.path, &status_args).map_err(&retained)?.trim().is_empty() {
+        return Err(retained("Local changes remain; removal was cancelled.".into()));
+    }
+    git(path, &["worktree", "remove", "--", &tree.path]).map_err(retained)?;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn worktree_stash_and_close(path: String, target_path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || stash_and_close(&path, &target_path))
+        .await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn worktree_cleanup(path: String, active_path: String) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {

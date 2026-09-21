@@ -1932,7 +1932,15 @@ function attachRowEvents(
       }
     });
   });
-  if (n.kind === "commit") {
+  if (n.worktree) {
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [{
+        label: "Stash saved work and close worktree…",
+        action: () => void doStashAndCloseWorktree(repo.path, n.worktree!),
+      }]);
+    });
+  } else if (n.kind === "commit") {
     const hash = n.commit!.hash;
     const refsHere = refsByHash.get(hash) ?? [];
     row.addEventListener("contextmenu", (e) => {
@@ -2030,6 +2038,9 @@ function showBranchHint(t: Tab, hash: string) {
 async function selectNode(n: GNode | null, scroll = false) {
   const t = cur();
   if (!t || !n) return;
+  ++filesRequest;
+  lastFiles = null;
+  projectCache = null;
   t.selected = n.id;
   t.hlOff = false; // clicking a commit re-enables the lineage highlight
   showDiffView(false); // return main area to the graph
@@ -2195,23 +2206,38 @@ function buildTree(paths: string[]): TNode {
 
 let lastNum: Map<string, { a: number; d: number }> = new Map();
 
+let filesRequest = 0;
+function isStash(path: string, hash: string | null): boolean {
+  const repo = cur()?.repo;
+  return repo?.path === path && repo.stashes.some((s) => s.hash === hash);
+}
+
 async function loadFiles(path: string, hash: string | null) {
+  const request = ++filesRequest;
+  const tab = cur();
+  const selected = tab?.selected;
+  const current = () => request === filesRequest && cur() === tab && tab?.selected === selected;
+  lastFiles = null;
+  projectCache = null;
   const filesUl = $("d-files");
   filesUl.innerHTML = "<li class='muted'>loading…</li>";
   try {
     const [files, num] = await Promise.all([
       hash
-        ? invoke<FileChange[]>("commit_files", { path, hash })
+        ? invoke<FileChange[]>("commit_files", { path, hash, stash: isStash(path, hash) })
         : invoke<FileChange[]>("wip_files", { path }),
       invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", {
         path,
         hash: hash ?? "",
+        stash: isStash(path, hash),
       }).catch(() => []),
     ]);
+    if (!current()) return;
     lastNum = new Map(num.map((n) => [n.path, { a: n.added, d: n.deleted }]));
     lastFiles = { files, path, hash };
     renderFileList();
   } catch (e) {
+    if (!current()) return;
     filesUl.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
   }
 }
@@ -2272,15 +2298,18 @@ function fileRow(f: FileChange, depth: number, label: string, path: string, hash
 
 async function loadProject() {
   if (!lastFiles) return;
-  const { path, hash } = lastFiles;
+  const source = lastFiles;
+  const { path, hash } = source;
   const ul = $("d-files");
   if (!projectCache || projectCache.hash !== hash) {
     ul.innerHTML = "<li class='muted'>loading project…</li>";
     try {
       const [tree, num] = await Promise.all([
         invoke<string[]>("commit_tree", { path, hash: hash ?? "" }),
-        invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", { path, hash: hash ?? "" }),
+        invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", { path, hash: hash ?? "", stash: isStash(path, hash) }),
       ]);
+      if (lastFiles !== source) return;
+      tree.push(...source.files.map((f) => f.path).filter((p) => !tree.includes(p)));
       const m = new Map<string, { a: number; d: number }>();
       for (const n of num) m.set(n.path, { a: n.added, d: n.deleted });
       // collapse everything except the folders leading to a changed file
@@ -2295,6 +2324,7 @@ async function loadProject() {
       }
       projectCache = { hash, root: buildTree(tree), num: m, expanded };
     } catch (e) {
+      if (lastFiles !== source) return;
       ul.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
       return;
     }
@@ -3521,7 +3551,7 @@ async function finishMerge() {
 // language for syntax highlighting in the currently shown diff/blame view
 let hlLang: string | null = null;
 
-function showDiffText(title: string, diff: string) {
+function showDiffText(title: string, diff: string, staged?: boolean) {
   hlLang = diffCtx ? langForFile(diffCtx.file) : null;
   $("diffview-title").textContent = title;
   const body = $("diffview-body");
@@ -3529,6 +3559,11 @@ function showDiffText(title: string, diff: string) {
     renderUnifiedDiff(diff, hlLang) ||
     "<div class='dl ctx'><span class='dc'>(no changes)</span></div>";
   showDiffView(true);
+  // Hunk actions change header heights: finish layout before measuring markers.
+  if (staged !== undefined) {
+    decorateStageableRows(staged);
+    if (!wipFull) decorateHunkRows(staged);
+  }
   buildMinimap();
 }
 
@@ -4087,7 +4122,7 @@ async function openDiff(
     const diff = functionView && !functionView.whole
       ? functionView.diff
       : hash
-      ? await invoke<string>("commit_diff", { path, hash, file, full: functionView ? true : diffFull })
+      ? await invoke<string>("commit_diff", { path, hash, file, stash: isStash(path, hash), full: functionView ? true : diffFull })
       : await invoke<string>("wip_diff", { path, file });
     if (diffCtx !== context) return;
     showDiffText(functionView && !functionView.whole ? `${title} · ${functionView.name}` : title, diff);
@@ -4133,9 +4168,7 @@ async function openWipDiff(path: string, file: string, staged: boolean) {
   try {
     const diff = await invoke<string>("wip_diff_split", { path, file, staged, full: wipFull });
     wipDiffCtx = { path, file, staged, diff };
-    showDiffText(title, diff);
-    decorateStageableRows(staged);
-    if (!wipFull) decorateHunkRows(staged);
+    showDiffText(title, diff, staged);
     const wb = $("diffview-whole");
     wb.classList.remove("hidden");
     wb.textContent = wipFull ? "Hunks only" : "Whole file";
@@ -4318,7 +4351,7 @@ async function toggleCherryPickLines() {
   try {
     const [wtDiff, commitDiff] = await Promise.all([
       invoke<string>("diff_worktree_to_commit", { path, hash, file }),
-      invoke<string>("commit_diff", { path, hash, file }),
+      invoke<string>("commit_diff", { path, hash, file, stash: isStash(path, hash) }),
     ]);
     // what the commit actually changed — used to tell its changes apart from
     // unrelated local edits (those show purple and are not pickable)
@@ -4808,7 +4841,7 @@ function buildMinimap() {
   const body = $("diffview-body");
   const map = $("diff-minimap");
   map.innerHTML = "";
-  const rows = body.children;
+  const rows = body.querySelectorAll<HTMLElement>(".dl");
   const total = rows.length;
   const contentH = body.scrollHeight || 1;
   if (!total) return;
@@ -5658,6 +5691,36 @@ async function doWorktree(path: string, hash: string) {
   const dir = await open({ directory: true, title: "Pick an empty folder for the worktree" });
   if (!dir || Array.isArray(dir)) return;
   runAction(invoke("worktree_add", { path, dir, hash }), "Worktree created");
+}
+async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["worktree"]>) {
+  const key = repoPathKey(tree.path);
+  if (isBusy() || cleaningWorktrees.has(key)) return;
+  if ((editOn && editDirty()) || [...worktreeDrafts.values()].some(v => repoPathKey(v.path) === key && v.draft !== undefined)) {
+    errorModal("Save or cancel your file editor changes before closing this worktree.");
+    return;
+  }
+  if (!(await confirmModal(`Stash saved work and close ${tree.branch || "detached worktree"}?\n\n${tree.path}\n\nAll changes, including untracked and ignored files, will be saved in a stash. The worktree folder will be removed. Its branch will be preserved.`))) return;
+  if (isBusy() || cleaningWorktrees.has(key)) return;
+  cleaningWorktrees.add(key);
+  pushBusy();
+  try {
+    const hash = await invoke<string | null>("worktree_stash_and_close", { path, targetPath: tree.path });
+    const selected = cur();
+    for (let i = tabs.length - 1; i >= 0; i--) {
+      if (repoPathKey(tabs[i].repo.path) === key) tabs.splice(i, 1);
+    }
+    active = selected ? tabs.indexOf(selected) : -1;
+    if (active < 0 && tabs.length) active = 0;
+    for (const tab of tabs) tab.stale = true;
+    renderTabs(); saveSession();
+    await reloadActive(hash ? "Saved work stashed and worktree closed; branch preserved" : "Clean worktree closed; branch preserved");
+  } catch (e) {
+    await reloadActive();
+    errorModal(`Could not close worktree:\n${String(e)}`);
+  } finally {
+    cleaningWorktrees.delete(key);
+    popBusy();
+  }
 }
 async function doHardReset(path: string, hash: string, branch: string, sha: string) {
   const ok = await confirmModal(

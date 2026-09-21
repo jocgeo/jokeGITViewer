@@ -908,21 +908,33 @@ async fn merge_continue(path: String, kind: String) -> Result<(), String> {
     }
 }
 
+// A stash's third parent holds untracked files in a separate root commit.
+// Use the same comparison for file names, statistics and patches.
+fn revision_changes(path: &str, hash: &str, stash: bool, options: &[&str], file: Option<&str>) -> Result<String, String> {
+    let mut args = vec!["show", "--format=", "--diff-merges=first-parent", "-M"];
+    args.extend_from_slice(options);
+    args.push(hash);
+    args.push("--");
+    if let Some(file) = file { args.push(file); }
+    let mut raw = git(path, &args)?;
+    if stash {
+        let parents = git(path, &["rev-list", "--parents", "-n", "1", hash, "--"])?;
+        if let Some(untracked) = parents.split_whitespace().nth(3) {
+            let mut args = vec!["show", "--format=", "--root", "-M"];
+            args.extend_from_slice(options);
+            args.push(untracked);
+            args.push("--");
+            if let Some(file) = file { args.push(file); }
+            raw.push('\n');
+            raw.push_str(&git(path, &args)?);
+        }
+    }
+    Ok(raw)
+}
+
 #[tauri::command]
-async fn commit_files(path: String, hash: String) -> Result<Vec<FileChange>, String> {
-    // --first-parent so merge commits report their changes (a plain `show`
-    // prints nothing for merges); also works for root and normal commits.
-    let raw = git(
-        &path,
-        &[
-            "show",
-            "--name-status",
-            "--first-parent",
-            "--pretty=format:",
-            "-M",
-            &hash,
-        ],
-    )?;
+async fn commit_files(path: String, hash: String, stash: Option<bool>) -> Result<Vec<FileChange>, String> {
+    let raw = revision_changes(&path, &hash, stash.unwrap_or(false), &["--name-status"], None)?;
     let mut files = Vec::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -950,22 +962,10 @@ async fn commit_diff(
     hash: String,
     file: String,
     full: Option<bool>,
+    stash: Option<bool>,
 ) -> Result<String, String> {
-    // hunks only (-U3) by default; -U100000 shows the whole file as context
     let ctx = if full.unwrap_or(false) { "-U100000" } else { "-U3" };
-    git(
-        &path,
-        &[
-            "show",
-            "--format=",
-            "--first-parent",
-            ctx,
-            "-M",
-            &hash,
-            "--",
-            &file,
-        ],
-    )
+    revision_changes(&path, &hash, stash.unwrap_or(false), &[ctx], Some(&file))
 }
 
 #[derive(Serialize)]
@@ -2262,11 +2262,11 @@ pub struct NumStat {
 
 // added/deleted line counts per changed file for a commit (or WIP if hash empty)
 #[tauri::command]
-async fn commit_numstat(path: String, hash: String) -> Result<Vec<NumStat>, String> {
+async fn commit_numstat(path: String, hash: String, stash: Option<bool>) -> Result<Vec<NumStat>, String> {
     let raw = if hash.is_empty() {
         git(&path, &["diff", "--numstat", "HEAD"])?
     } else {
-        git(&path, &["show", "--numstat", "--format=", "--first-parent", "-M", &hash])?
+        revision_changes(&path, &hash, stash.unwrap_or(false), &["--numstat"], None)?
     };
     let mut out = Vec::new();
     for line in raw.lines() {
@@ -2374,6 +2374,7 @@ pub fn run() {
             submodule_ready,
             worktrees::worktree_list,
             worktrees::worktree_cleanup,
+            worktrees::worktree_stash_and_close,
             update_submodule,
             remote_manager::remote_manage,
             remote_manager::branch_remote_setting,

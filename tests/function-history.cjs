@@ -138,7 +138,7 @@ async function functionViewTest() {
   };
   const ctx = {
     $: element, setBlameBtn() {}, setPlainBtn() {}, setEditBtn() {}, setPickButtons() {},
-    isImage: () => false, showDiffView() {}, escapeHtml: String, diffFull: true,
+    isStash: () => false, isImage: () => false, showDiffView() {}, escapeHtml: String, diffFull: true,
     showDiffText: (_title, diff) => calls.push(diff),
     invoke: async (command, args) => {
       assert.equal(command, 'commit_diff');

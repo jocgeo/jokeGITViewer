@@ -1350,6 +1350,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .cp-btnrow { display: flex; gap: 8px; margin-top: 12px; }
 .cp-btnrow button { flex: 1 1 0; padding: 9px; font-weight: 600; }
 .cp-abort { background: #5a2020; border-color: #8a3030; color: #ffb3ae; }
+/* Share the longest line's width so backgrounds cover horizontal scrolling.
+   Unpositioned wrappers keep minimap offsets relative to the scroller. */
+.diff-lines { width: max-content; min-width: 100%; }
 .dl { display: flex; }
 .dl .ln {
   flex: 0 0 46px;
@@ -1365,7 +1368,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .dl.del { background: rgba(248, 81, 73, 0.16); }
 .dl.del .dc { color: #ffc0bc; }
 .dl.hunk {
-  background: rgba(56, 139, 253, 0.12);
+  background: linear-gradient(rgba(56, 139, 253, 0.12), rgba(56, 139, 253, 0.12)), var(--bg);
   align-items: center;
   padding: 2px 0;
   position: sticky;
@@ -1376,7 +1379,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* diff header + @@ hunk rows are UI chrome — don't include them when copying */
 .dl.meta, .dl.hunk { user-select: none; }
 /* per-hunk stage/discard buttons on the @@ bars */
-.hunk-btns { margin-left: auto; display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
+.hunk-btns { position: sticky; right: 0; background: var(--bg2); margin-left: auto; display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
 .hunk-stage { border-color: #2ea043; color: #7ee787; }
 .hunk-stage:hover { background: rgba(46, 160, 67, 0.2); }
 .hunk-discard { border-color: #f85149; color: #ffa198; }

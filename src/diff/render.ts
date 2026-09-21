@@ -101,6 +101,11 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
   let oldN = 0;
   let newN = 0;
   const rows: string[] = [];
+  let hunkOpen = false;
+  const closeHunk = () => {
+    if (hunkOpen) rows.push("</section>");
+    hunkOpen = false;
+  };
   // data-ln = the file line this row maps to (new side; old side for pure
   // deletions) — used by "history of selected lines"
   const row = (cls: string, ln1: string, ln2: string, codeHtml: string) => {
@@ -156,6 +161,9 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
         oldN = +m[1];
         newN = +m[2];
       }
+      closeHunk();
+      rows.push('<section class="diff-hunk">');
+      hunkOpen = true;
       rows.push(row("hunk", "", "", escapeHtml(line)));
     } else if (
       line.startsWith("diff ") ||
@@ -171,6 +179,7 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
       line.startsWith("\\")
     ) {
       flush();
+      if (line.startsWith("diff ")) closeHunk();
       rows.push(row("meta", "", "", escapeHtml(line)));
     } else if (line.startsWith("+")) {
       adds.push({ text: line.slice(1), ln: newN++, html: newHl[ni++] ?? "" });
@@ -184,5 +193,6 @@ export function renderUnifiedDiff(diff: string, lang: string | null): string {
     }
   }
   flush();
-  return rows.join("");
+  closeHunk();
+  return rows.length ? `<div class="diff-lines">${rows.join("")}</div>` : "";
 }
