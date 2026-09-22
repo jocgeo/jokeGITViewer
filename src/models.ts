@@ -87,6 +87,7 @@ export interface Tab {
   placed: Placed[];
   fingerprint?: string; // cheap repo-state signature for auto-refresh
   remoteTags?: Set<string>; // tag names confirmed on the configured remote
+  remoteTagsRemote?: string; // explicit remote most recently used for tag actions
   hint?: { hash: string; branch: string }; // "which branch" ghost for selected commit
   hidden?: Set<string>; // ref keys hidden from the graph
   stale?: boolean; // loaded from cache, needs a background refresh

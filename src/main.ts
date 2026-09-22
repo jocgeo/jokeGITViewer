@@ -1105,7 +1105,7 @@ function unitBadge(u: RefUnit, laneColor?: string): string {
     if (gRemoteTags.has(u.name)) {
       icons += icon("remote"); // also on remote
     } else {
-      extra = `<span class="tagpush" title="not confirmed on the configured remote">↑</span>`;
+      extra = `<span class="tagpush" title="not confirmed on ${escapeHtml(cur()?.remoteTagsRemote ?? "the configured remote")}">↑</span>`;
     }
   }
   const cls = u.tag ? "tag" : u.remote && !u.local ? "remote" : "local";
@@ -1141,17 +1141,21 @@ function unitBadge(u: RefUnit, laneColor?: string): string {
 }
 
 // Fetch tags on the configured remote (network), then re-render badges.
+const remoteTagRequests = new WeakMap<Tab, number>();
 async function refreshRemoteTags(t: Tab) {
+  const request = (remoteTagRequests.get(t) ?? 0) + 1;
+  remoteTagRequests.set(t, request);
+  const path = t.repo.path;
   try {
-    const tags = await invoke<string[]>("remote_tags", { path: t.repo.path });
+    const tags = await invoke<string[]>("remote_tags", { path, remote: t.remoteTagsRemote ?? null });
+    if (remoteTagRequests.get(t) !== request || t.repo.path !== path) return;
     t.remoteTags = new Set(tags);
     if (cur() === t) {
       gRemoteTags = t.remoteTags;
       renderGraph(t);
     }
   } catch {
-    t.remoteTags = new Set();
-    if (cur() === t) { gRemoteTags = t.remoteTags; renderGraph(t); }
+    // Offline/auth failures are not evidence that confirmed tags disappeared.
   }
 }
 
@@ -2022,6 +2026,16 @@ function attachRowEvents(
         );
       });
     }
+  } else if (n.kind === "wip") {
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [{
+        label: "Stash WIP",
+        action: () => {
+          if (cur()?.repo.path === repo.path) void doStashBtn();
+        },
+      }]);
+    });
   } else if (n.kind === "stash") {
     const s = n.stash!;
     row.addEventListener("contextmenu", (e) => {
@@ -5118,6 +5132,7 @@ async function autoFetch() {
   autoFetching = true;
   try {
     await fetchRepo(t.repo.path);
+    await refreshRemoteTags(t);
   } catch {
     /* offline / no remote / auth — ignore */
   } finally {
@@ -5655,7 +5670,8 @@ async function doBranch() {
 }
 async function doStashBtn() {
   const t = cur();
-  if (!t) return;
+  if (!t || isBusy()) return;
+  if (t.repo.conflict.active) { errorModal("Resolve the current conflict before stashing."); return; }
   runAction(invoke("stash_push", { path: t.repo.path }), "Stashed changes", "stash-btn");
 }
 async function doTerminal() {
@@ -5969,10 +5985,20 @@ async function remoteTagAction(path: string, name: string, remove: boolean) {
     const remote = await chooseRemote(path, remove ? "Delete tag on remote" : "Push tag to remote", true);
     if (!remote) return;
     if (remove && !await confirmModal(`Delete tag ${name} on ${remote}?`)) return;
-    await runAction(invoke(remove ? "delete_remote_tag" : "push_tag", { path, name, remote }),
-      `${remove ? "Deleted" : "Pushed"} tag ${name} ${remove ? "on" : "to"} ${remote}`);
-    const t = tabs.find(t => t.repo.path === path);
-    if (t) void refreshRemoteTags(t);
+    pushBusy();
+    try {
+      await invoke(remove ? "delete_remote_tag" : "push_tag", { path, name, remote });
+      for (const t of tabs.filter(t => t.repo.path === path)) {
+        remoteTagRequests.set(t, (remoteTagRequests.get(t) ?? 0) + 1);
+        if (t.remoteTagsRemote !== remote) t.remoteTags = new Set();
+        t.remoteTagsRemote = remote;
+        t.remoteTags ??= new Set();
+        if (remove) t.remoteTags.delete(name); else t.remoteTags.add(name);
+        if (cur() === t) { gRemoteTags = t.remoteTags; renderGraph(t); }
+        void refreshRemoteTags(t);
+      }
+      setStatus(`${remove ? "Deleted" : "Pushed"} tag ${name} ${remove ? "on" : "to"} ${remote}`);
+    } finally { popBusy(); }
   } catch (e) { errorModal(String(e)); }
 }
 

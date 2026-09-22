@@ -1,0 +1,34 @@
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const ts = require('typescript');
+const assert = require('assert/strict');
+const source = fs.readFileSync(path.join(__dirname, '../src/main.ts'), 'utf8');
+const snippet = source.slice(source.indexOf('const remoteTagRequests ='), source.indexOf('// branches: primary'));
+(async () => {
+  const pending = [];
+  const tab = { repo: { path: 'repo' }, remoteTagsRemote: 'upstream' };
+  let active = tab;
+  let renders = 0;
+  const ctx = { cur: () => active, renderGraph: () => renders++, invoke: (_, args) => {
+    assert.equal(args.remote, 'upstream');
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  } };
+  vm.createContext(ctx);
+  vm.runInContext(ts.transpileModule(snippet, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, ctx);
+  const old = ctx.refreshRemoteTags(tab);
+  const latest = ctx.refreshRemoteTags(tab);
+  pending[1].resolve(['v0.0.2']); await latest;
+  pending[0].resolve([]); await old;
+  assert(tab.remoteTags.has('v0.0.2'));
+  const offline = ctx.refreshRemoteTags(tab);
+  pending[2].reject('offline'); await offline;
+  assert(tab.remoteTags.has('v0.0.2'));
+  assert.equal(renders, 1);
+  const background = ctx.refreshRemoteTags(tab);
+  active = null;
+  pending[3].resolve(['v0.0.3']); await background;
+  assert(tab.remoteTags.has('v0.0.3'));
+  assert.equal(renders, 1);
+  console.log('PASS: tag refresh ignores stale responses, retains confirmed tags offline, uses selected remote, and does not render inactive tabs');
+})().catch(e => { console.error(e); process.exitCode = 1; });
