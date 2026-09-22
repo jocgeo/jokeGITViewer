@@ -934,6 +934,7 @@ fn revision_changes(path: &str, hash: &str, stash: bool, options: &[&str], file:
 
 #[tauri::command]
 async fn commit_files(path: String, hash: String, stash: Option<bool>) -> Result<Vec<FileChange>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     let raw = revision_changes(&path, &hash, stash.unwrap_or(false), &["--name-status"], None)?;
     let mut files = Vec::new();
     for line in raw.lines() {
@@ -954,6 +955,7 @@ async fn commit_files(path: String, hash: String, stash: Option<bool>) -> Result
         });
     }
     Ok(files)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2263,6 +2265,7 @@ pub struct NumStat {
 // added/deleted line counts per changed file for a commit (or WIP if hash empty)
 #[tauri::command]
 async fn commit_numstat(path: String, hash: String, stash: Option<bool>) -> Result<Vec<NumStat>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     let raw = if hash.is_empty() {
         git(&path, &["diff", "--numstat", "HEAD"])?
     } else {
@@ -2287,6 +2290,7 @@ async fn commit_numstat(path: String, hash: String, stash: Option<bool>) -> Resu
         });
     }
     Ok(out)
+    }).await.map_err(|e| e.to_string())?
 }
 
 // files that differ between a commit and the working tree
@@ -2376,6 +2380,7 @@ pub fn run() {
             worktrees::worktree_cleanup,
             worktrees::worktree_stash_and_close,
             worktrees::worktree_apply_saved,
+            worktrees::worktree_delete,
             update_submodule,
             remote_manager::remote_manage,
             remote_manager::branch_remote_setting,

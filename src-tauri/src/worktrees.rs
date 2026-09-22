@@ -221,3 +221,28 @@ pub async fn worktree_apply_saved(path: String, source_path: String) -> Result<(
     tauri::async_runtime::spawn_blocking(move || apply_saved_work(&path, &source_path))
         .await.map_err(|e| e.to_string())?
 }
+
+fn delete_clean_worktree(path: &str, target_path: &str) -> Result<(), String> {
+    let _lock = SWITCH.lock().map_err(|_| "Worktree operation interrupted".to_string())?;
+    let target = std::fs::canonicalize(target_path).map_err(|e| e.to_string())?;
+    if target == std::fs::canonicalize(path).map_err(|e| e.to_string())? {
+        return Err("Switch to another worktree before deleting this one.".into());
+    }
+    let trees = list(path)?;
+    let (index, tree) = trees.iter().enumerate().find(|(_, t)|
+        std::fs::canonicalize(&t.path).ok().as_ref() == Some(&target))
+        .ok_or("This worktree is no longer registered in this repository.")?;
+    if index == 0 || tree.bare || tree.locked || tree.missing || tree.branch.is_empty() {
+        return Err("Cannot delete the main checkout, a locked, missing, or detached worktree.".into());
+    }
+    if !git_ro(&tree.path, &["status", "--porcelain", "--untracked-files=all", "--ignored", "--ignore-submodules=none"])?.trim().is_empty() {
+        return Err("This worktree has local files or changes. Use Stash saved work and close worktree to preserve them first.".into());
+    }
+    git(path, &["worktree", "remove", "--", &tree.path]).map(|_| ())
+}
+
+#[tauri::command]
+pub async fn worktree_delete(path: String, target_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_clean_worktree(&path, &target_path))
+        .await.map_err(|e| e.to_string())?
+}

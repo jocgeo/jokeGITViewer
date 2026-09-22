@@ -71,11 +71,12 @@ console.log('PASS: root, merge, empty commit, staged stash, mixed stash and untr
   const source = fs.readFileSync(path.join(__dirname, '../src/main.ts'), 'utf8');
   const snippet = source.slice(source.indexOf('let filesRequest = 0;'), source.indexOf('function numBadge('));
   const pending = [];
-  const element = { innerHTML: '' };
+  const stats = [];
+  const element = { innerHTML: '', querySelectorAll: () => [] };
   let tab = { selected: 'old', repo: { path: 'repo', stashes: [] } };
   const ctx = {
     cur: () => tab, $: () => element, escapeHtml: String,
-    invoke: (command) => command === 'commit_numstat' ? Promise.resolve([]) : new Promise((resolve, reject) => pending.push({ resolve, reject })),
+    invoke: (command) => new Promise((resolve, reject) => (command === 'commit_numstat' ? stats : pending).push({ resolve, reject })),
     renderFileList() { ctx.rendered = ctx.lastFiles; },
   };
   vm.createContext(ctx);
@@ -85,14 +86,19 @@ console.log('PASS: root, merge, empty commit, staged stash, mixed stash and untr
   const next = ctx.loadFiles('repo', 'new');
   pending[1].resolve([{ path: 'new.txt', status: 'A' }]);
   await next;
+  assert.equal(ctx.rendered.hash, 'new', 'files appear while statistics are still pending');
   pending[0].resolve([]);
   await old;
   assert.equal(ctx.rendered.hash, 'new');
   const stale = ctx.loadFiles('repo', 'new');
   tab = { selected: 'elsewhere', repo: { path: 'elsewhere', stashes: [] } };
+  stats[0].resolve([{ path: 'new.txt', added: 999, deleted: 0 }]);
+  await Promise.resolve();
+  assert.equal(ctx.lastNum.size, 0, 'stale statistics must not update another selection');
   element.innerHTML = 'other repository';
   pending[2].reject('old error');
   await stale;
   assert.equal(element.innerHTML, 'other repository');
   console.log('PASS: stale file lists and errors cannot overwrite newer selections');
+  console.log('PASS: file navigation does not wait for statistics; stale statistics are ignored');
 })().catch(e => { console.error(e); process.exitCode = 1; });

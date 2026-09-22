@@ -24,9 +24,14 @@ fn git(path: &str, args: &[&str]) -> Result<String, String> {
 fn git_ro(path: &str, args: &[&str]) -> Result<String, String> { git(path, args) }
 ${definitions}
 ${helper}
+${source.slice(source.indexOf('fn delete_clean_worktree('), source.indexOf('#[tauri::command]\npub async fn worktree_delete'))}
 ${source.slice(source.indexOf('fn apply_saved_work('), source.indexOf('#[tauri::command]\npub async fn worktree_apply_saved'))}
 fn main() {
  let a: Vec<String> = std::env::args().collect();
+ if a.get(3).map(String::as_str) == Some("delete") {
+  if let Err(e) = delete_clean_worktree(&a[1], &a[2]) { eprintln!("{e}"); std::process::exit(1); }
+  return;
+ }
  if a.get(3).map(String::as_str) == Some("apply") {
   if let Err(e) = apply_saved_work(&a[1], &a[2]) { eprintln!("{e}"); std::process::exit(1); }
   return;
@@ -47,6 +52,21 @@ fs.writeFileSync(path.join(repo, 'tracked'), 'base\n');
 fs.writeFileSync(path.join(repo, '.gitignore'), '*.ignored\n');
 git('add', '.'); git('commit', '-m', 'base');
 const tree = path.join(root, 'saved work');
+const removable = path.join(root, 'delete-me');
+git('worktree', 'add', '-b', 'delete-me', removable);
+assert.match(run(exe, [repo, repo, 'delete'], root, false), /Switch/);
+assert.match(run(exe, [removable, repo, 'delete'], root, false), /main checkout/);
+git('worktree', 'lock', removable);
+assert.match(run(exe, [repo, removable, 'delete'], root, false), /locked/);
+git('worktree', 'unlock', removable);
+fs.writeFileSync(path.join(removable, 'local.ignored'), 'keep');
+assert.match(run(exe, [repo, removable, 'delete'], root, false), /local files/);
+assert.equal(fs.readFileSync(path.join(removable, 'local.ignored'), 'utf8'), 'keep');
+fs.unlinkSync(path.join(removable, 'local.ignored'));
+run(exe, [repo, removable, 'delete']);
+assert.equal(fs.existsSync(removable), false);
+assert.match(git('branch', '--list', 'delete-me'), /delete-me/);
+console.log('PASS: explicit deletion preserves branches and refuses active, main, locked and locally modified worktrees');
 git('worktree', 'add', '-b', 'saved', tree);
 fs.writeFileSync(path.join(tree, 'tracked'), 'staged\n');
 run('git', ['add', 'tracked'], tree);

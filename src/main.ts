@@ -480,6 +480,7 @@ async function cleanupPreviousWorktree(previous: Tab | null) {
 }
 async function cleanupOneWorktree(path: string) {
   if (!worktreesEnabled) return;
+  if ((editOn && editDirty()) || [...worktreeDrafts.values()].some(v => repoPathKey(v.path) === repoPathKey(path) && v.draft !== undefined)) return;
   const current = cur();
   if (!current || repoPathKey(path) === repoPathKey(current.repo.path)) return;
   const key = repoPathKey(path);
@@ -967,6 +968,15 @@ function renderSidebar(t: Tab) {
       else if (!isBusy()) void loadRepo(tree.path).then(() => reloadActive());
     });
     worktreeList.append(li);
+    li.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [
+        { label: "Stash saved work and close worktree…", action: () => void doStashAndCloseWorktree(repo.path, tree) },
+        { label: "Delete clean worktree…", action: () => void doStashAndCloseWorktree(repo.path, tree, true) },
+        { separator: true },
+        { label: "Clean up unused worktrees…", action: () => void doCleanupWorktrees() },
+      ]);
+    });
   }
 
   // submodules — click to open as their own repo tab
@@ -1966,6 +1976,9 @@ function attachRowEvents(
       }, {
         label: "Stash saved work and close worktree…",
         action: () => void doStashAndCloseWorktree(repo.path, n.worktree!),
+      }, {
+        label: "Delete clean worktree…",
+        action: () => void doStashAndCloseWorktree(repo.path, n.worktree!, true),
       }]);
     });
   } else if (n.kind === "commit") {
@@ -2248,22 +2261,27 @@ async function loadFiles(path: string, hash: string | null) {
   lastFiles = null;
   projectCache = null;
   const filesUl = $("d-files");
+  lastNum = new Map();
   filesUl.innerHTML = "<li class='muted'>loading…</li>";
   try {
-    const [files, num] = await Promise.all([
-      hash
+    const files = await (hash
         ? invoke<FileChange[]>("commit_files", { path, hash, stash: isStash(path, hash) })
-        : invoke<FileChange[]>("wip_files", { path }),
-      invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", {
-        path,
-        hash: hash ?? "",
-        stash: isStash(path, hash),
-      }).catch(() => []),
-    ]);
+        : invoke<FileChange[]>("wip_files", { path }));
     if (!current()) return;
-    lastNum = new Map(num.map((n) => [n.path, { a: n.added, d: n.deleted }]));
     lastFiles = { files, path, hash };
     renderFileList();
+    // Statistics may scan large blobs. Never hold the file list behind them,
+    // or rebuild the list under the user when they eventually arrive.
+    void invoke<{ path: string; added: number; deleted: number }[]>("commit_numstat", {
+      path, hash: hash ?? "", stash: isStash(path, hash),
+    }).then(num => {
+      if (!current()) return;
+      lastNum = new Map(num.map(n => [n.path, { a: n.added, d: n.deleted }]));
+      filesUl.querySelectorAll<HTMLElement>("[data-stat-path]").forEach(row => {
+        row.querySelector(".numstat")?.remove();
+        row.insertAdjacentHTML("beforeend", numBadge(row.dataset.statPath!));
+      });
+    }).catch(() => { /* File navigation remains usable without statistics. */ });
   } catch (e) {
     if (!current()) return;
     filesUl.innerHTML = `<li class='muted'>${escapeHtml(String(e))}</li>`;
@@ -2281,6 +2299,7 @@ function numBadge(file: string): string {
 
 function fileRow(f: FileChange, depth: number, label: string, path: string, hash: string | null): HTMLLIElement {
   const li = document.createElement("li");
+  li.dataset.statPath = f.path;
   const s = f.status.charAt(0).toUpperCase();
   const cls = s === "?" ? "Q" : s;
   li.style.paddingLeft = `${6 + depth * 14}px`;
@@ -5740,7 +5759,22 @@ async function doApplySavedWork(path: string, tree: NonNullable<GNode["worktree"
     popBusy();
   }
 }
-async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["worktree"]>) {
+async function doCleanupWorktrees() {
+  const tab = cur();
+  if (!worktreesEnabled || !tab || isBusy()) return;
+  if (!(await confirmModal("Clean up unused worktrees?\n\nRemove clean worktrees managed by this app. Worktrees with local or ignored files, manual worktrees, locked worktrees, detached worktrees, and the active checkout are kept. Branches are preserved."))) return;
+  if (!worktreesEnabled || cur() !== tab || isBusy()) return;
+  pushBusy();
+  try {
+    tab.repo.worktrees = await invoke<NonNullable<RepoData["worktrees"]>>("worktree_list", { path: tab.repo.path });
+    const before = tab.repo.worktrees.length;
+    await cleanupPreviousWorktree(null);
+    await reloadActive();
+    setStatus(`Worktree cleanup finished: ${Math.max(0, before - (tab.repo.worktrees?.length ?? before))} removed; branches preserved`);
+  } catch (e) { errorModal(String(e)); }
+  finally { popBusy(); }
+}
+async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["worktree"]>, deleteOnly = false) {
   if (!worktreesEnabled) return;
   const key = repoPathKey(tree.path);
   if (isBusy() || cleaningWorktrees.has(key)) return;
@@ -5748,12 +5782,15 @@ async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["wo
     errorModal("Save or cancel your file editor changes before closing this worktree.");
     return;
   }
-  if (!(await confirmModal(`Stash saved work and close ${tree.branch || "detached worktree"}?\n\n${tree.path}\n\nAll changes, including untracked and ignored files, will be saved in a stash. The worktree folder will be removed. Its branch will be preserved.`))) return;
+  const question = deleteOnly
+    ? `Delete worktree ${tree.branch || "detached worktree"}?\n\n${tree.path}\n\nThe folder will be removed and its branch preserved. Deletion is refused if local or ignored files remain.`
+    : `Stash saved work and close ${tree.branch || "detached worktree"}?\n\n${tree.path}\n\nAll changes, including untracked and ignored files, will be saved in a stash. The worktree folder will be removed. Its branch will be preserved.`;
+  if (!(await confirmModal(question))) return;
   if (isBusy() || cleaningWorktrees.has(key)) return;
   cleaningWorktrees.add(key);
   pushBusy();
   try {
-    const hash = await invoke<string | null>("worktree_stash_and_close", { path, targetPath: tree.path });
+    const hash = await invoke<string | null>(deleteOnly ? "worktree_delete" : "worktree_stash_and_close", { path, targetPath: tree.path });
     const selected = cur();
     for (let i = tabs.length - 1; i >= 0; i--) {
       if (repoPathKey(tabs[i].repo.path) === key) tabs.splice(i, 1);
@@ -6154,7 +6191,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("settings-btn").addEventListener("click", (e) => {
     e.stopPropagation(); // Keep the opening click from reaching the global menu dismiss handler.
     const bounds = $("settings-btn").getBoundingClientRect();
-    showMenu(bounds.right, bounds.bottom, [{ label: "Enable worktree features", checked: worktreesEnabled, action: toggleWorktrees }]);
+    showMenu(bounds.right, bounds.bottom, [
+      { label: "Enable worktree features", checked: worktreesEnabled, action: toggleWorktrees },
+      ...(worktreesEnabled && cur() ? [{ label: "Clean up unused worktrees…", action: () => void doCleanupWorktrees() }] : []),
+    ]);
   });
   $("clone-btn").addEventListener("click", doClone);
   $("init-btn").addEventListener("click", doInit);
