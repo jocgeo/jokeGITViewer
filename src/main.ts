@@ -512,6 +512,7 @@ function switchTab(i: number) {
   renderTabs();
   renderActive();
   syncChatToTab();
+  syncCommitDraftToTab();
   void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
   // fetch remote-tag status the first time this tab is viewed
@@ -535,6 +536,7 @@ function closeTab(i: number) {
   renderTabs();
   renderActive();
   syncChatToTab();
+  syncCommitDraftToTab();
   void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
   const selected = cur();
@@ -2902,6 +2904,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     renderTabs();
     renderActive();
     syncChatToTab();
+    syncCommitDraftToTab();
     void syncRepoHost(); // avatars are looked up against this repo's origin
     saveSession();
     saveRepoCache(path, repo);
@@ -3000,6 +3003,7 @@ async function restoreSession() {
   renderTabs();
   renderActive();
   syncChatToTab();
+  syncCommitDraftToTab();
   void syncRepoHost(); // avatars are looked up against this repo's origin
   saveSession();
 
@@ -4921,6 +4925,63 @@ function buildMinimap() {
   map.appendChild(fragment);
 }
 
+// ---- per-repo commit message drafts ----
+// The commit panel is one shared set of inputs, so a message typed in one repo
+// would otherwise still be sitting there after switching to another tab. Every
+// repo keeps its own draft, restored when its tab becomes the active one.
+type CommitDraft = { summary: string; desc: string; amend: boolean };
+const draftKey = (path: string) => `jkt.draft:${repoPathKey(path)}`;
+let draftRepoKey = ""; // repo whose draft the inputs currently hold
+
+function saveCommitDraft() {
+  const t = cur();
+  if (!t) return;
+  const draft: CommitDraft = {
+    summary: ($("c-summary") as HTMLInputElement).value,
+    desc: ($("c-desc") as HTMLTextAreaElement).value,
+    amend: ($("c-amend") as HTMLInputElement).checked,
+  };
+  try {
+    if (draft.summary || draft.desc || draft.amend)
+      localStorage.setItem(draftKey(t.repo.path), JSON.stringify(draft));
+    else localStorage.removeItem(draftKey(t.repo.path));
+  } catch {}
+}
+
+function clearCommitDraft(path: string) {
+  ($("c-summary") as HTMLInputElement).value = "";
+  ($("c-desc") as HTMLTextAreaElement).value = "";
+  ($("c-amend") as HTMLInputElement).checked = false;
+  try {
+    localStorage.removeItem(draftKey(path));
+  } catch {}
+}
+
+// load the active repo's own draft into the shared inputs; a no-op while the
+// same repo stays active, so re-renders never clobber what is being typed
+function syncCommitDraftToTab() {
+  const t = cur();
+  const key = t ? repoPathKey(t.repo.path) : "";
+  if (key === draftRepoKey) return;
+  draftRepoKey = key;
+  let draft: CommitDraft = { summary: "", desc: "", amend: false };
+  if (t) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(draftKey(t.repo.path)) ?? "null");
+      if (raw && typeof raw === "object")
+        draft = {
+          summary: String(raw.summary ?? ""),
+          desc: String(raw.desc ?? ""),
+          amend: !!raw.amend,
+        };
+    } catch {}
+  }
+  ($("c-summary") as HTMLInputElement).value = draft.summary;
+  ($("c-desc") as HTMLTextAreaElement).value = draft.desc;
+  ($("c-amend") as HTMLInputElement).checked = draft.amend;
+  updateCommitEnabled();
+}
+
 function updateCommitEnabled() {
   const summary = ($("c-summary") as HTMLInputElement).value.trim();
   const amend = ($("c-amend") as HTMLInputElement).checked;
@@ -4986,9 +5047,7 @@ async function doCommit() {
   pushBusy();
   try {
     await invoke("commit", { path: t.repo.path, message, amend });
-    ($("c-summary") as HTMLInputElement).value = "";
-    ($("c-desc") as HTMLTextAreaElement).value = "";
-    ($("c-amend") as HTMLInputElement).checked = false;
+    clearCommitDraft(t.repo.path);
     await reloadActive("Committed");
   } catch (e) {
     errorModal("Commit failed:\n" + String(e));
@@ -5799,6 +5858,7 @@ async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["wo
     if (active < 0 && tabs.length) active = 0;
     for (const tab of tabs) tab.stale = true;
     renderTabs(); saveSession();
+    syncCommitDraftToTab(); // closing the active worktree lands on another repo
     await reloadActive(hash ? "Saved work stashed and worktree closed; branch preserved" : "Clean worktree closed; branch preserved");
   } catch (e) {
     await reloadActive();
@@ -6207,8 +6267,15 @@ window.addEventListener("DOMContentLoaded", () => {
   $("stage-all").addEventListener("click", doStageAll);
   $("unstage-all").addEventListener("click", doUnstageAll);
   $("c-commit").addEventListener("click", doCommit);
-  $("c-amend").addEventListener("change", updateCommitEnabled);
-  $("c-summary").addEventListener("input", updateCommitEnabled);
+  $("c-amend").addEventListener("change", () => {
+    updateCommitEnabled();
+    saveCommitDraft();
+  });
+  $("c-summary").addEventListener("input", () => {
+    updateCommitEnabled();
+    saveCommitDraft();
+  });
+  $("c-desc").addEventListener("input", saveCommitDraft);
   $("diffview-close").addEventListener("click", () => showDiffView(false));
   $("diffview-worktree").addEventListener("click", () => void openCurrentWorktree());
   $("worktree-refresh").addEventListener("click", () => void reloadCurrentWorktree());
