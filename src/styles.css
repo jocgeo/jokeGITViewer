@@ -1166,11 +1166,13 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   left: 2px;
   right: 2px;
   height: 3px;
+  min-height: 3px; /* a run-length bar never shrinks below visible */
   border-radius: 1px;
   cursor: pointer;
 }
 .mm.add { background: #3fb950; }
 .mm.del { background: #f85149; }
+.mm.mod { background: #e3b341; } /* editor rail: changed since the commit */
 .mm.dup { background: #a371f7; }
 /* find-in-file matches on the rail — narrower + on top of change marks */
 .mm.find {
@@ -1521,6 +1523,58 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* fallback when highlighting is off (unknown language / very large file) */
 #dv-edit.plaintext { color: var(--fg); background: var(--bg); }
 #dv-edit.plaintext::selection { color: var(--fg); }
+/* Line numbers sit in their own column to the left of both layers, scrolled
+   along with them. Both layers start where it ends (--eln-w, measured once the
+   numbers are in), so the caret still lands on the text it points at. */
+#dv-editnums {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: max-content;
+  min-width: 46px;
+  box-sizing: border-box;
+  padding: 8px 10px 8px 6px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+  color: var(--muted);
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  user-select: none;
+  z-index: 2;
+}
+#dv-editwrap #dv-edithl,
+#dv-editwrap #dv-edit { left: var(--eln-w, 0px); }
+.eln { position: relative; opacity: .7; }
+/* lines that are not in the commit yet — a bar hugging the code */
+.eln.add, .eln.mod { color: var(--fg); opacity: 1; }
+.eln.add::before,
+.eln.mod::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -10px;
+  width: 3px;
+}
+.eln.add::before { background: #2ea043; }
+.eln.mod::before { background: #e3b341; }
+/* deleted lines have no row left to mark, so point at the seam they left
+   behind — a wedge, not a bar, or it reads as one more changed line */
+.eln.gap::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  right: -10px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid #f85149;
+}
 #diffview-save { border-color: #2ea043; color: #7ee787; font-weight: 600; }
 #diffview-save:hover { background: rgba(46, 160, 67, 0.2); }
 

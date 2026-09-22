@@ -3988,11 +3988,13 @@ async function toggleEditFile() {
     // syntax-highlighted layer behind a transparent textarea, so editing keeps
     // the same coloring as every other file view
     body.innerHTML =
-      `<div id="dv-editwrap"><pre id="dv-edithl" aria-hidden="true"></pre>` +
+      `<div id="dv-editwrap"><div id="dv-editnums" aria-hidden="true"></div>` +
+      `<pre id="dv-edithl" aria-hidden="true"></pre>` +
       `<textarea id="dv-edit" spellcheck="false"></textarea></div>`;
     const ta = $("dv-edit") as HTMLTextAreaElement;
     ta.value = content;
     setupEditHighlight(langForFile(file));
+    setupEditGutter(path, file);
     ta.focus();
   } catch (e) {
     body.innerHTML = `<div class='dl ctx'><span class='dc'>${escapeHtml(String(e))}</span></div>`;
@@ -4041,6 +4043,301 @@ function setupEditHighlight(lang: string | null) {
   paint();
 }
 
+// ---- edit gutter: line numbers, and where the pending changes are ----
+// The editor trades the diff view's colouring for a plain buffer, so the gutter
+// carries that part: every line that differs from the committed file is marked,
+// saved or still being typed. Green = line the commit doesn't have, yellow =
+// line changed since it, red notch = lines removed at that seam.
+const EDIT_GUTTER_MAX_LINES = 20000; // past this the gutter costs more than it gives
+const LCS_MAX_CELLS = 250_000; // exact diff under this; unique-line anchors above
+type EditMark = "add" | "mod";
+interface EditMarks {
+  marks: Map<number, EditMark>; // line index -> how it differs
+  gaps: Set<number>; // line index with removed lines just above it
+}
+let editBaseLines: string[] | null = null; // committed file — null until it lands
+let gutterRows: HTMLElement[] = [];
+let gutterMarked: number[] = []; // rows carrying a class right now
+let editLineH = 18; // px per editor line, measured when the editor opens
+let editPadTop = 8;
+
+function editLines(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").split("\n");
+}
+
+function lineMarks(base: string[], now: string[]): EditMarks {
+  const out: EditMarks = { marks: new Map(), gaps: new Set() };
+  diffRange(base, 0, base.length, now, 0, now.length, out);
+  return out;
+}
+
+// Identical head and tail first — while typing that alone usually leaves a
+// couple of lines to compare. What remains goes to an exact LCS when it is
+// small, and otherwise gets split on lines that appear exactly once on both
+// sides (patience-style), so two edits far apart stay two marks instead of one
+// block swallowing everything between them.
+function diffRange(
+  a: string[],
+  a0: number,
+  a1: number,
+  b: string[],
+  b0: number,
+  b1: number,
+  out: EditMarks
+) {
+  while (a0 < a1 && b0 < b1 && a[a0] === b[b0]) {
+    a0++;
+    b0++;
+  }
+  while (a1 > a0 && b1 > b0 && a[a1 - 1] === b[b1 - 1]) {
+    a1--;
+    b1--;
+  }
+  if (a0 === a1 && b0 === b1) return;
+  if (a0 === a1) {
+    for (let j = b0; j < b1; j++) out.marks.set(j, "add");
+    return;
+  }
+  if (b0 === b1) {
+    if (b.length) out.gaps.add(Math.min(b0, b.length - 1));
+    return;
+  }
+  if ((a1 - a0) * (b1 - b0) <= LCS_MAX_CELLS) {
+    lcsMarks(a, a0, a1, b, b0, b1, out);
+    return;
+  }
+  const anchors = uniqueAnchors(a, a0, a1, b, b0, b1);
+  if (!anchors.length) {
+    for (let j = b0; j < b1; j++) out.marks.set(j, "mod");
+    return;
+  }
+  let pa = a0;
+  let pb = b0;
+  for (const [ai, bi] of anchors) {
+    diffRange(a, pa, ai, b, pb, bi, out);
+    pa = ai + 1;
+    pb = bi + 1;
+  }
+  diffRange(a, pa, a1, b, pb, b1, out);
+}
+
+// lines occurring exactly once on each side, kept in increasing order (LIS)
+function uniqueAnchors(
+  a: string[],
+  a0: number,
+  a1: number,
+  b: string[],
+  b0: number,
+  b1: number
+): [number, number][] {
+  const countA = new Map<string, number>();
+  const posA = new Map<string, number>();
+  for (let i = a0; i < a1; i++) {
+    countA.set(a[i], (countA.get(a[i]) ?? 0) + 1);
+    posA.set(a[i], i);
+  }
+  const countB = new Map<string, number>();
+  for (let j = b0; j < b1; j++) countB.set(b[j], (countB.get(b[j]) ?? 0) + 1);
+  const pairs: [number, number][] = [];
+  for (let j = b0; j < b1; j++) {
+    if (countA.get(b[j]) === 1 && countB.get(b[j]) === 1) pairs.push([posA.get(b[j])!, j]);
+  }
+  // longest run whose a-positions also increase — the rest would cross
+  const tails: number[] = [];
+  const from: number[] = [];
+  for (let k = 0; k < pairs.length; k++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pairs[tails[mid]][0] < pairs[k][0]) lo = mid + 1;
+      else hi = mid;
+    }
+    from[k] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = k;
+  }
+  const picked: [number, number][] = [];
+  for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = from[k]) picked.push(pairs[k]);
+  return picked.reverse();
+}
+
+// exact line diff of a small region, turned straight into marks
+function lcsMarks(
+  a: string[],
+  a0: number,
+  a1: number,
+  b: string[],
+  b0: number,
+  b1: number,
+  out: EditMarks
+) {
+  const n = a1 - a0;
+  const m = b1 - b0;
+  const width = m + 1;
+  const dp = new Int32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * width + j] =
+        a[a0 + i] === b[b0 + j]
+          ? dp[(i + 1) * width + j + 1] + 1
+          : Math.max(dp[(i + 1) * width + j], dp[i * width + j + 1]);
+    }
+  }
+  let removed = 0; // deletions seen since the last matching line
+  let added: number[] = [];
+  const flush = (at: number) => {
+    if (added.length) for (const j of added) out.marks.set(j, removed ? "mod" : "add");
+    else if (removed && b.length) out.gaps.add(Math.min(at, b.length - 1));
+    removed = 0;
+    added = [];
+  };
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[a0 + i] === b[b0 + j]) {
+      flush(b0 + j);
+      i++;
+      j++;
+    } else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
+      removed++;
+      i++;
+    } else {
+      added.push(b0 + j);
+      j++;
+    }
+  }
+  removed += n - i;
+  for (; j < m; j++) added.push(b0 + j);
+  flush(b1);
+}
+
+// neighbouring lines of the same kind become one bar on the rail
+function changeRuns(
+  marks: Map<number, EditMark>,
+  total: number
+): { kind: EditMark; from: number; len: number }[] {
+  const runs: { kind: EditMark; from: number; len: number }[] = [];
+  let kind: EditMark | null = null;
+  let start = 0;
+  for (let i = 0; i <= total; i++) {
+    const here = i < total ? (marks.get(i) ?? null) : null;
+    if (here === kind) continue;
+    if (kind) runs.push({ kind, from: start, len: i - start });
+    kind = here;
+    start = i;
+  }
+  return runs;
+}
+
+function setupEditGutter(path: string, file: string) {
+  const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
+  const nums = document.getElementById("dv-editnums");
+  if (!ta || !nums) return;
+  editBaseLines = null;
+  gutterRows = [];
+  gutterMarked = [];
+  // metrics for the rail: every editor line is exactly one line-height tall,
+  // which is what lets a line index become a position without measuring rows
+  const style = getComputedStyle(ta);
+  editLineH = parseFloat(style.lineHeight) || 18;
+  editPadTop = parseFloat(style.paddingTop) || 0;
+  let queued = false;
+  ta.addEventListener("input", () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      paintGutter();
+    });
+  });
+  ta.addEventListener("scroll", () => {
+    nums.scrollTop = ta.scrollTop;
+  });
+  paintGutter(); // numbers now; the marks follow as soon as the commit lands
+  invoke<string>("file_at_commit", { path, hash: "HEAD", file })
+    .then((committed) => {
+      editBaseLines = editLines(committed);
+    })
+    .catch(() => {
+      editBaseLines = []; // no committed version: the whole file is new
+    })
+    .finally(() => {
+      if (document.getElementById("dv-edit") === ta) paintGutter();
+    });
+}
+
+function paintGutter() {
+  const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
+  const nums = document.getElementById("dv-editnums");
+  const wrap = document.getElementById("dv-editwrap");
+  if (!ta || !nums || !wrap) return;
+  const lines = ta.value.split("\n");
+  const tooLong = lines.length > EDIT_GUTTER_MAX_LINES;
+  nums.classList.toggle("hidden", tooLong);
+  if (tooLong) {
+    wrap.style.removeProperty("--eln-w"); // give the room back to the text
+    gutterRows = []; // whatever is in there is stale — rebuild if it shrinks back
+  } else if (gutterRows.length !== lines.length) {
+    nums.innerHTML = lines.map((_l, i) => `<div class="eln">${i + 1}</div>`).join("");
+    gutterRows = Array.from(nums.children) as HTMLElement[];
+    gutterMarked = [];
+    // the numbers are as wide as they are; the text starts after them
+    wrap.style.setProperty("--eln-w", `${nums.offsetWidth}px`);
+    nums.scrollTop = ta.scrollTop;
+  }
+  for (const i of gutterMarked) gutterRows[i]?.classList.remove("add", "mod", "gap");
+  gutterMarked = [];
+  if (!editBaseLines) {
+    paintEditRail(ta, null, 0);
+    return;
+  }
+  const { marks, gaps } = lineMarks(editBaseLines, lines);
+  // a file too long for a gutter has no rows to mark, but still gets the rail
+  for (const [i, kind] of marks) {
+    if (!gutterRows[i]) continue;
+    gutterRows[i].classList.add(kind);
+    gutterMarked.push(i);
+  }
+  for (const i of gaps) {
+    if (!gutterRows[i]) continue;
+    gutterRows[i].classList.add("gap");
+    gutterMarked.push(i);
+  }
+  paintEditRail(ta, { marks, gaps }, lines.length);
+}
+
+// The same rail the diff view paints its red/green marks on, driven by the
+// editor's marks instead of rows: one bar per run of changed lines, as tall as
+// the run is, so a glance down the edge finds the pending work in a long file.
+// Find marks live on the rail too and are repainted by their own pass — leave
+// them be, or typing would wipe the search hits.
+function paintEditRail(
+  ta: HTMLTextAreaElement,
+  found: { marks: Map<number, EditMark>; gaps: Set<number> } | null,
+  total: number
+) {
+  const map = $("diff-minimap");
+  map.querySelectorAll(".mm:not(.find)").forEach((x) => x.remove());
+  if (!found || !total) return;
+  const contentH = ta.scrollHeight || 1;
+  const fragment = document.createDocumentFragment();
+  const place = (kind: string, from: number, len: number) => {
+    const top = editPadTop + from * editLineH;
+    const mark = document.createElement("div");
+    mark.className = `mm ${kind}`;
+    mark.style.top = `${(top / contentH) * 100}%`;
+    if (len > 1) mark.style.height = `${((len * editLineH) / contentH) * 100}%`;
+    mark.title = "pending change — click to jump";
+    mark.addEventListener("click", () => {
+      ta.scrollTop = top - ta.clientHeight / 2;
+    });
+    fragment.appendChild(mark);
+  };
+  for (const run of changeRuns(found.marks, total)) place(run.kind, run.from, run.len);
+  for (const i of found.gaps) place("del", i, 1);
+  map.appendChild(fragment);
+}
+
 async function saveEditedFile() {
   const ta = document.getElementById("dv-edit") as HTMLTextAreaElement | null;
   if (!diffCtx || !ta) return;
@@ -4086,7 +4383,13 @@ function dvfRun(query: string) {
   dvfMatches = [];
   const q = query.toLowerCase();
   if (q) {
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    // the editor's line numbers are real text, but nobody searches for them
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) =>
+        n.parentElement?.closest("#dv-editnums")
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
     let node: Node | null;
     outer: while ((node = walker.nextNode())) {
       const text = (node.textContent ?? "").toLowerCase();
