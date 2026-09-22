@@ -24,8 +24,13 @@ fn git(path: &str, args: &[&str]) -> Result<String, String> {
 fn git_ro(path: &str, args: &[&str]) -> Result<String, String> { git(path, args) }
 ${definitions}
 ${helper}
+${source.slice(source.indexOf('fn apply_saved_work('), source.indexOf('#[tauri::command]\npub async fn worktree_apply_saved'))}
 fn main() {
  let a: Vec<String> = std::env::args().collect();
+ if a.get(3).map(String::as_str) == Some("apply") {
+  if let Err(e) = apply_saved_work(&a[1], &a[2]) { eprintln!("{e}"); std::process::exit(1); }
+  return;
+ }
  match stash_and_close(&a[1], &a[2]) {
   Ok(hash) => println!("{}", hash.unwrap_or_default()),
   Err(e) => { eprintln!("{e}"); std::process::exit(1); }
@@ -86,4 +91,35 @@ git('worktree', 'add', '-b', 'submodule', sub);
 run('git', ['update-index', '--add', '--cacheinfo', `160000,${git('rev-parse', 'HEAD').trim()},nested`], sub);
 assert.match(run(exe, [repo, sub], root, false), /submodules/);
 assert.equal(fs.existsSync(sub), true);
+// Applying copies saved work without clearing the source's files or index.
+const applySource = path.join(root, 'apply-source');
+git('worktree', 'add', '-b', 'apply-source', applySource);
+fs.writeFileSync(path.join(applySource, 'tracked'), 'staged copy\n');
+run('git', ['add', 'tracked'], applySource);
+fs.writeFileSync(path.join(applySource, 'tracked'), 'working copy\n');
+fs.writeFileSync(path.join(applySource, 'untracked'), 'new copy\n');
+const sourceStatus = run('git', ['status', '--porcelain'], applySource);
+fs.writeFileSync(path.join(repo, 'untracked'), 'keep local file\n');
+assert.match(run(exe, [repo, applySource, 'apply'], root, false), /would be overwritten/);
+assert.equal(fs.readFileSync(path.join(repo, 'untracked'), 'utf8'), 'keep local file\n');
+fs.unlinkSync(path.join(repo, 'untracked'));
+fs.writeFileSync(path.join(repo, 'tracked'), 'keep my edits\n');
+assert.match(run(exe, [repo, applySource, 'apply'], root, false), /could not be fully applied/);
+assert.equal(fs.readFileSync(path.join(repo, 'tracked'), 'utf8'), 'keep my edits\n');
+git('restore', 'tracked');
+run(exe, [repo, applySource, 'apply']);
+assert.equal(fs.readFileSync(path.join(repo, 'tracked'), 'utf8'), 'working copy\n');
+assert.equal(fs.readFileSync(path.join(repo, 'untracked'), 'utf8'), 'new copy\n');
+assert.equal(run('git', ['status', '--porcelain'], applySource), sourceStatus);
+assert.equal(run('git', ['show', ':tracked'], applySource), 'staged copy\n');
+assert.equal(fs.readFileSync(path.join(applySource, 'tracked'), 'utf8'), 'working copy\n');
+assert.equal(fs.readFileSync(path.join(applySource, 'untracked'), 'utf8'), 'new copy\n');
+assert.match(run(exe, [repo, repo, 'apply'], root, false), /already/);
+git('add', '.'); git('commit', '-m', 'Applied saved work');
+fs.writeFileSync(path.join(repo, 'tracked'), 'divergent committed content\n');
+git('add', 'tracked'); git('commit', '-m', 'Diverge');
+assert.match(run(exe, [repo, applySource, 'apply'], root, false), /conflicts/);
+assert.match(git('ls-files', '--unmerged'), /tracked/);
+assert.equal(run('git', ['status', '--porcelain'], applySource), sourceStatus);
+console.log('PASS: applying saved work copies tracked and untracked contents, preserves source staging and refuses to overwrite destination edits');
 console.log('PASS: stash and close preserves staged, unstaged, untracked and ignored work; branches retained; main, active, locked and conflicted worktrees protected');

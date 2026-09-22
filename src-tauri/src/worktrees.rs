@@ -151,3 +151,73 @@ pub async fn worktree_cleanup(path: String, active_path: String) -> Result<bool,
         Ok(true)
     }).await.map_err(|e| e.to_string())?
 }
+
+// A private index snapshots tracked and untracked changes without touching the
+// source worktree's files or staging area. Keep the snapshot for conflict recovery.
+fn apply_saved_work(path: &str, source_path: &str) -> Result<(), String> {
+    let _lock = SWITCH.lock().map_err(|_| "Worktree operation interrupted".to_string())?;
+    let source = std::fs::canonicalize(source_path).map_err(|e| e.to_string())?;
+    if source == std::fs::canonicalize(path).map_err(|e| e.to_string())? {
+        return Err("This saved work is already in the current worktree.".into());
+    }
+    let trees = list(path)?;
+    let tree = trees.iter().find(|t| !t.bare && !t.missing &&
+        std::fs::canonicalize(&t.path).ok().as_ref() == Some(&source))
+        .ok_or("The source worktree is no longer available in this repository.")?;
+    for location in [path, tree.path.as_str()] {
+        if !git_ro(location, &["ls-files", "--unmerged"])?.is_empty() {
+            return Err("Resolve existing conflicts before applying saved work.".into());
+        }
+        if git_ro(location, &["ls-files", "--stage", "-z"])?.split('\0').any(|s| s.starts_with("160000 ")) {
+            return Err("Applying saved work containing submodules is not supported.".into());
+        }
+    }
+    let temp = std::env::temp_dir().join(format!("jkt-apply-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos()));
+    std::fs::create_dir(&temp).map_err(|e| e.to_string())?;
+    let index = temp.join("index");
+    let snapshot = (|| -> Result<String, String> {
+        let run = |args: &[&str]| -> Result<String, String> {
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("-C").arg(&tree.path).args(args).env("GIT_INDEX_FILE", &index);
+            #[cfg(windows)] {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let out = cmd.output().map_err(|e| e.to_string())?;
+            if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        // Seed from the real index to preserve staged additions, including ignored files.
+        let original = git_ro(&tree.path, &["write-tree"])?;
+        run(&["read-tree", original.trim()])?;
+        run(&["add", "--all", "--", "."])?;
+        run(&["stash", "create"])
+    })();
+    let _ = std::fs::remove_file(&index);
+    let _ = std::fs::remove_dir(&temp);
+    let hash = snapshot?;
+    let hash = hash.trim();
+    if hash.is_empty() { return Err("This worktree has no saved changes to apply.".into()); }
+    // Merge machinery can replace ignored files. Protect all destination-local
+    // paths, including file/directory collisions, before applying the snapshot.
+    let changed = git_ro(path, &["diff", "--name-only", "--no-renames", "-z", &format!("{hash}^1"), hash, "--"])?;
+    let local = git_ro(path, &["ls-files", "--others", "-z"])?;
+    for file in local.split('\0').filter(|p| !p.is_empty()) {
+        if changed.split('\0').filter(|p| !p.is_empty()).any(|p|
+            p == file || p.starts_with(&format!("{file}/")) || file.starts_with(&format!("{p}/"))) {
+            return Err(format!("Cannot apply saved work: local file {file} would be overwritten. Move or save it first."));
+        }
+    }
+    let message = format!("Saved work — {} (applied from {})", tree.branch, tree.path);
+    git(path, &["stash", "store", "-m", &message, hash])?;
+    git(path, &["stash", "apply", hash]).map_err(|e|
+        format!("Saved work could not be fully applied. Check the current worktree for conflicts. The source is unchanged and snapshot {hash} is retained in the stash list.\n{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn worktree_apply_saved(path: String, source_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || apply_saved_work(&path, &source_path))
+        .await.map_err(|e| e.to_string())?
+}

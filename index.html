@@ -76,6 +76,9 @@
             <input id="search" class="search" type="text" placeholder="Search branch / message / hash / tag…" />
             <div id="search-results" class="hidden"></div>
           </div>
+          <button id="settings-btn" class="tbtn" title="Settings" aria-label="Settings" aria-haspopup="menu">
+            <span aria-hidden="true">⚙</span><span>Settings</span>
+          </button>
         </div>
       </header>
 
@@ -121,7 +124,7 @@
             </div>
             <ul id="submodules-list" class="reflist"></ul>
           </div>
-          <div class="side-section" data-sec="worktree">
+          <div class="side-section hidden" data-sec="worktree">
             <div class="side-head">
               <span class="chev">▸</span><span class="sicon"></span>
               <span class="lbl">Worktrees</span><span class="count" id="count-worktree">0</span>

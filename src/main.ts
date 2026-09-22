@@ -7,7 +7,7 @@ import { intraline, renderUnifiedDiff } from "./diff/render";
 import type { RefInfo, FileChange, StashEntry, RepoData, GNode, Placed, Tab } from "./models";
 import hljs, { langForFile, hlLines, hlLine } from "./highlighting";
 import { escapeHtml } from "./html";
-import { WIP_ID, STASH_COLOR, WIP_COLOR, COLORS, refKey, buildNodes, layout } from "./graph-model";
+import { WIP_ID, STASH_COLOR, WIP_COLOR, COLORS, refKey, buildNodes as buildGraphNodes, layout } from "./graph-model";
 import { promptModal, errorModal as showErrorModal, choiceModal, confirmModal } from "./ui/dialogs";
 import { showMenu, closeMenu } from "./ui/context-menu";
 import type { MenuItem } from "./ui/context-menu";
@@ -49,6 +49,28 @@ let graphPanX = 0; // horizontal scroll offset inside the graph column
 // ---- app state ----
 const tabs: Tab[] = [];
 let active = -1;
+const LS_WORKTREES = "jkt-worktrees-enabled";
+let worktreesEnabled = localStorage.getItem(LS_WORKTREES) === "1";
+
+function buildNodes(repo: RepoData, hidden?: Set<string>): GNode[] {
+  return buildGraphNodes(worktreesEnabled ? repo : { ...repo, worktrees: [] }, hidden);
+}
+
+function toggleWorktrees() {
+  if (isBusy() || cleaningWorktrees.size) {
+    setStatus("Wait for the current operation to finish before changing worktree settings");
+    return;
+  }
+  worktreesEnabled = !worktreesEnabled;
+  try { localStorage.setItem(LS_WORKTREES, worktreesEnabled ? "1" : "0"); } catch { /* optional preference */ }
+  for (const tab of tabs) {
+    tab.nodes = buildNodes(tab.repo, tab.hidden);
+    if (tab.selected && !tab.nodes.some(n => n.id === tab.selected)) tab.selected = null;
+  }
+  document.querySelector('[data-sec="worktree"]')?.classList.toggle("hidden", !worktreesEnabled);
+  renderActive();
+  setStatus(worktreesEnabled ? "Worktree features enabled" : "Worktree features disabled");
+}
 
 const cur = (): Tab | null => (active >= 0 ? tabs[active] : null);
 
@@ -449,6 +471,7 @@ function moveTab(from: number, to: number) {
 
 const cleaningWorktrees = new Set<string>();
 async function cleanupPreviousWorktree(previous: Tab | null) {
+  if (!worktreesEnabled) return;
   const selected = cur();
   if (!selected) return;
   const candidates = new Set((selected.repo.worktrees ?? []).filter(w => w.dirty === false).map(w => w.path));
@@ -456,6 +479,7 @@ async function cleanupPreviousWorktree(previous: Tab | null) {
   for (const path of candidates) await cleanupOneWorktree(path);
 }
 async function cleanupOneWorktree(path: string) {
+  if (!worktreesEnabled) return;
   const current = cur();
   if (!current || repoPathKey(path) === repoPathKey(current.repo.path)) return;
   const key = repoPathKey(path);
@@ -926,8 +950,9 @@ function renderSidebar(t: Tab) {
   }
 
   const worktreeList = $("worktrees-list");
+  worktreeList.closest(".side-section")?.classList.toggle("hidden", !worktreesEnabled);
   worktreeList.replaceChildren();
-  const worktrees = (repo.worktrees ?? []).filter(w => !w.bare);
+  const worktrees = (worktreesEnabled ? repo.worktrees ?? [] : []).filter(w => !w.bare);
   $("count-worktree").textContent = String(worktrees.length);
   for (const tree of worktrees) {
     const li = document.createElement("li");
@@ -1690,7 +1715,7 @@ function paintViewport() {
       // monitor for a local branch, a cloud for a remote-only one, a tag
       // glyph for tags. Ordinary commits stay small dots so the tips pop.
       const refsHere = refsByHash.get(c.hash) ?? [];
-      const treesHere = (repo.worktrees ?? []).filter(w => !w.bare && !w.missing && w.head === c.hash);
+      const treesHere = (worktreesEnabled ? repo.worktrees ?? [] : []).filter(w => !w.bare && !w.missing && w.head === c.hash);
       const tip = treesHere.length ? "worktree" : tipGlyph(refsHere);
       const isMerge = c.parents.length > 1;
       const isHead = c.hash === repo.head;
@@ -1936,6 +1961,9 @@ function attachRowEvents(
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [{
+        label: "Apply to current worktree",
+        action: () => void doApplySavedWork(repo.path, n.worktree!),
+      }, {
         label: "Stash saved work and close worktree…",
         action: () => void doStashAndCloseWorktree(repo.path, n.worktree!),
       }]);
@@ -5029,7 +5057,7 @@ async function pollActive() {
   polling = true;
   try {
     await checkOpenFileChanged(); // content edits don't move the fingerprint
-    if (Date.now() - (worktreeRefreshTimes.get(t) ?? 0) > 10000 && !isBusy()) {
+    if (worktreesEnabled && Date.now() - (worktreeRefreshTimes.get(t) ?? 0) > 10000 && !isBusy()) {
       worktreeRefreshTimes.set(t, Date.now());
       const worktrees = await invoke<NonNullable<RepoData["worktrees"]>>("worktree_list", { path: t.repo.path });
       if (JSON.stringify(worktrees) !== JSON.stringify(t.repo.worktrees)) {
@@ -5415,8 +5443,8 @@ async function doCheckout(target: string, upstream?: string, create = false) {
   if (!create && t.repo.wip) {
     const ok = await confirmModal(
       `Check out ${target}?\n\n` +
-        `You have uncommitted changes. They are stashed first and stay in the ` +
-        `Stashes section, so nothing is lost — apply the stash to get them back.`
+        `Tracked changes will be saved in Stashes. Untracked files stay in this folder. ` +
+        `Checkout will stop if a local file would be overwritten.`
     );
     if (!ok) return;
   }
@@ -5433,12 +5461,13 @@ async function doCheckout(target: string, upstream?: string, create = false) {
         upstream: upstream ?? null,
       });
       await reloadActive(
-        stashed ? `Checked out ${target} — your changes were stashed` : `Checked out ${target}`
+        stashed ? `Checked out ${target} — tracked changes stashed; untracked files retained` : `Checked out ${target}`
       );
     }
   } catch (e) {
     setStatus("");
-    errorModal("Checkout failed:\n" + String(e));
+    await reloadActive();
+    errorModal("Checkout failed:\n" + String(e) + "\n\nAny stash created before the failure is available in Stashes.");
   } finally {
     popBusy();
   }
@@ -5688,11 +5717,31 @@ async function doCreateTag(path: string, hash: string, annotated: boolean) {
   }
 }
 async function doWorktree(path: string, hash: string) {
+  if (!worktreesEnabled) return;
   const dir = await open({ directory: true, title: "Pick an empty folder for the worktree" });
   if (!dir || Array.isArray(dir)) return;
   runAction(invoke("worktree_add", { path, dir, hash }), "Worktree created");
 }
+async function doApplySavedWork(path: string, tree: NonNullable<GNode["worktree"]>) {
+  if (!worktreesEnabled) return;
+  if (isBusy() || cur()?.repo.path !== path) return;
+  if ((editOn && editDirty()) || [...worktreeDrafts.values()].some(v => repoPathKey(v.path) === repoPathKey(path) && v.draft !== undefined)) {
+    errorModal("Save or cancel your file editor changes before applying saved work.");
+    return;
+  }
+  pushBusy();
+  try {
+    await invoke("worktree_apply_saved", { path, sourcePath: tree.path });
+    await reloadActive("Saved work applied; source preserved and a stash snapshot retained");
+  } catch (e) {
+    await reloadActive();
+    errorModal(String(e));
+  } finally {
+    popBusy();
+  }
+}
 async function doStashAndCloseWorktree(path: string, tree: NonNullable<GNode["worktree"]>) {
+  if (!worktreesEnabled) return;
   const key = repoPathKey(tree.path);
   if (isBusy() || cleaningWorktrees.has(key)) return;
   if ((editOn && editDirty()) || [...worktreeDrafts.values()].some(v => repoPathKey(v.path) === key && v.draft !== undefined)) {
@@ -5753,7 +5802,7 @@ function commitMenu(
   items.push({ label: `Checkout commit ${sha} (detached)`, action: () => doCheckout(hash) });
 
   items.push({ separator: true });
-  items.push({ label: "Create worktree from this commit…", action: () => doWorktree(path, hash) });
+  if (worktreesEnabled) items.push({ label: "Create worktree from this commit…", action: () => doWorktree(path, hash) });
   items.push({ label: "Create branch here…", action: () => doCreateBranch(path, hash) });
   items.push({
     label: "Cherry-pick commit",
@@ -6102,6 +6151,11 @@ function avatarUrl(key: string): string {
 }
 window.addEventListener("DOMContentLoaded", () => {
   $("open-btn").addEventListener("click", openRepo);
+  $("settings-btn").addEventListener("click", (e) => {
+    e.stopPropagation(); // Keep the opening click from reaching the global menu dismiss handler.
+    const bounds = $("settings-btn").getBoundingClientRect();
+    showMenu(bounds.right, bounds.bottom, [{ label: "Enable worktree features", checked: worktreesEnabled, action: toggleWorktrees }]);
+  });
   $("clone-btn").addEventListener("click", doClone);
   $("init-btn").addEventListener("click", doInit);
   $("fetch-btn").addEventListener("click", doFetch);

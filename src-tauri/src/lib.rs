@@ -1557,8 +1557,8 @@ async fn stage_lines_patch(
     git_stdin(&path, &args, &patch).map(|_| ())
 }
 
-// Checkout a branch / tag / commit. If the working tree is dirty, stash first
-// (including untracked) so the checkout can't be blocked.
+// Park tracked edits before switching. Leave untracked files (including running
+// build output and nested repositories) in place; checkout checks collisions.
 //
 // `upstream` is set when checking out a REMOTE branch (e.g. "origin/foo"):
 //   - no local branch yet -> create it tracking the remote (at remote tip)
@@ -1566,10 +1566,10 @@ async fn stage_lines_patch(
 //     so it reflects the latest fetched state (ff-only never loses local work).
 #[tauri::command]
 async fn checkout(path: String, target: String, upstream: Option<String>) -> Result<bool, String> {
-    let dirty = !git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty();
+    let dirty = !git(&path, &["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"])?.trim().is_empty();
     let mut stashed = false;
     if dirty {
-        git(&path, &["stash", "--include-untracked"])?;
+        git(&path, &["stash", "push", "-m", "Tracked changes before checkout"])?;
         stashed = true;
     }
 
@@ -1577,7 +1577,7 @@ async fn checkout(path: String, target: String, upstream: Option<String>) -> Res
     // that another linked worktree holds. We always allow it — a branch behaves
     // like any other ref here. (Committing then leaves the other worktree's
     // HEAD stale until it checks out again.)
-    let base: [&str; 2] = ["checkout", "--ignore-other-worktrees"];
+    let base: [&str; 3] = ["checkout", "--ignore-other-worktrees", "--no-overwrite-ignore"];
     let run = |extra: &[&str]| -> Result<String, String> {
         let mut args = base.to_vec();
         args.extend_from_slice(extra);
@@ -2375,6 +2375,7 @@ pub fn run() {
             worktrees::worktree_list,
             worktrees::worktree_cleanup,
             worktrees::worktree_stash_and_close,
+            worktrees::worktree_apply_saved,
             update_submodule,
             remote_manager::remote_manage,
             remote_manager::branch_remote_setting,
