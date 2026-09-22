@@ -710,6 +710,8 @@ function renderActive() {
   $("c-staged-n").textContent = "0";
   $("c-unstaged-n").textContent = "0";
   stagedCount = 0;
+  unstagedTracked = 0;
+  updateWipButtons(0);
   const t = cur();
   updateStatusBar(t);
   if (!t) {
@@ -3094,6 +3096,8 @@ async function refreshCommitFiles() {
   }
   if (cur() !== t || cur()?.repo.path !== path) return;
   stagedCount = res.staged.length;
+  unstagedTracked = res.unstaged.filter((f) => f.status !== "?").length;
+  updateWipButtons(res.unstaged.length);
 
   // `git stash push --staged` refuses a path that ALSO has worktree changes,
   // so a partially staged file has to be stashed from both sides at once.
@@ -4996,6 +5000,20 @@ function syncCommitDraftToTab() {
   updateCommitEnabled();
 }
 
+// untracked files sit in the unstaged list but are out of reach of the deletes
+let unstagedTracked = 0;
+
+// each bulk button is only live while it has something to act on; stash and
+// reset both need a first commit to work from
+function updateWipButtons(unstagedAll: number) {
+  const hasHead = !!cur()?.repo.head;
+  const enable = (id: string, on: boolean) => (($(id) as HTMLButtonElement).disabled = !on);
+  enable("delete-unstaged", unstagedTracked > 0);
+  enable("stash-unstaged", unstagedTracked > 0 && hasHead);
+  enable("delete-all", (stagedCount > 0 || unstagedTracked > 0) && hasHead);
+  enable("stash-all", (stagedCount > 0 || unstagedAll > 0) && hasHead);
+}
+
 function updateCommitEnabled() {
   const summary = ($("c-summary") as HTMLInputElement).value.trim();
   const amend = ($("c-amend") as HTMLInputElement).checked;
@@ -5050,6 +5068,67 @@ async function doUnstageAll() {
     errorModal(String(e));
   }
 }
+
+// ---- bulk discard / stash, scoped to what the panel shows ----
+// The buttons in the Unstaged header act on unstaged changes only; the ones in
+// the panel head act on the whole working tree. Neither delete touches an
+// untracked file — git keeps no copy of one, so it could never be brought back.
+function wipTarget(action: string): Tab | null {
+  const t = cur();
+  if (!t || isBusy()) return null;
+  if (t.repo.conflict.active) {
+    errorModal(`Resolve the current conflict before ${action}.`);
+    return null;
+  }
+  return t;
+}
+
+async function doDiscardAll() {
+  const t = wipTarget("deleting changes");
+  if (!t) return;
+  const n = stagedCount + unstagedTracked;
+  const ok = await confirmModal(
+    `Delete all ${n} change(s) in the working tree?\n\n` +
+      `Staged and unstaged changes are thrown away and every tracked file goes ` +
+      `back to its committed state. Untracked files are kept.\n\n` +
+      `This cannot be undone.`
+  );
+  if (!ok) return;
+  runAction(invoke("discard_all", { path: t.repo.path }), "Deleted all changes", "delete-all");
+}
+
+async function doDiscardUnstaged() {
+  const t = wipTarget("deleting changes");
+  if (!t) return;
+  const ok = await confirmModal(
+    `Delete ${unstagedTracked} unstaged change(s)?\n\n` +
+      `Staged changes and untracked files are kept.\n\n` +
+      `This cannot be undone.`
+  );
+  if (!ok) return;
+  runAction(
+    invoke("discard_unstaged", { path: t.repo.path }),
+    "Deleted unstaged changes",
+    "delete-unstaged"
+  );
+}
+
+async function doStashAll() {
+  const t = wipTarget("stashing");
+  if (!t) return;
+  runAction(invoke("stash_push", { path: t.repo.path }), "Stashed all changes", "stash-all");
+}
+
+async function doStashUnstaged() {
+  const t = wipTarget("stashing");
+  if (!t) return;
+  runAction(
+    invoke("stash_unstaged", { path: t.repo.path }),
+    "Stashed unstaged changes",
+    "stash-unstaged"
+  );
+}
+
 async function doCommit() {
   const t = cur();
   if (!t) return;
@@ -6292,6 +6371,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("terminal-btn").addEventListener("click", doTerminal);
   $("stage-all").addEventListener("click", doStageAll);
   $("unstage-all").addEventListener("click", doUnstageAll);
+  $("stash-all").addEventListener("click", doStashAll);
+  $("delete-all").addEventListener("click", doDiscardAll);
+  $("stash-unstaged").addEventListener("click", doStashUnstaged);
+  $("delete-unstaged").addEventListener("click", doDiscardUnstaged);
   $("c-commit").addEventListener("click", doCommit);
   $("c-amend").addEventListener("change", () => {
     updateCommitEnabled();

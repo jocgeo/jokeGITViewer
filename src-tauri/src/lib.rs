@@ -1712,6 +1712,102 @@ async fn stash_file(path: String, file: String, staged_only: bool) -> Result<(),
     git(&path, &["stash", "push", mode, "--", &file]).map(|_| ())
 }
 
+// ---- bulk discard / stash of working tree changes ----
+//
+// "unstaged" here means what the commit panel lists as unstaged MINUS untracked
+// files. Nothing below ever deletes an untracked file: git holds no copy of one,
+// so there would be nothing to put it back from.
+
+// (staged, unstaged) for tracked files only — `-uno` keeps untracked lines out.
+fn tracked_change_flags(path: &str) -> Result<(bool, bool), String> {
+    let raw = git(path, &["status", "--porcelain", "--untracked-files=no"])?;
+    let mut staged = false;
+    let mut unstaged = false;
+    for line in raw.lines() {
+        let b = line.as_bytes();
+        if b.len() < 3 {
+            continue;
+        }
+        if b[0] != b' ' {
+            staged = true;
+        }
+        if b[1] != b' ' {
+            unstaged = true;
+        }
+    }
+    Ok((staged, unstaged))
+}
+
+fn require_head(path: &str, what: &str) -> Result<(), String> {
+    if git(path, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Err(format!(
+            "This repository has no commits yet, so there is nothing to {what}."
+        ));
+    }
+    Ok(())
+}
+
+// Throw away every tracked change, staged and unstaged, like a fresh checkout
+// of HEAD. Untracked files stay.
+#[tauri::command]
+async fn discard_all(path: String) -> Result<(), String> {
+    // HEAD is spelled out on purpose: a bare `reset --hard` on a branch with no
+    // commits yet DELETES staged new files from disk. With HEAD git refuses, and
+    // require_head turns that refusal into a sentence.
+    require_head(&path, "restore files to")?;
+    git(&path, &["reset", "--hard", "HEAD"]).map(|_| ())
+}
+
+// Throw away worktree changes only: the index keeps whatever was staged.
+#[tauri::command]
+async fn discard_unstaged(path: String) -> Result<(), String> {
+    // `:/` is the whole repo no matter which directory git starts in.
+    git(&path, &["checkout", "--", ":/"]).map(|_| ())
+}
+
+// Stash the unstaged changes and leave the staging area exactly as it was.
+//
+// git can stash the index side on its own (--staged) but not the worktree side,
+// and --staged refuses a file that changed on both sides. So the staged state is
+// parked in a throwaway commit first: with the index then matching HEAD, a plain
+// stash can only pick up worktree changes. `reset --soft` hands the staging area
+// back. The stash entry keeps the temp commit alive as its base, which is what
+// lets it apply cleanly later — on pop the unstaged work lands back on top of
+// the still-staged work. No --include-untracked, so untracked files stay put.
+#[tauri::command]
+async fn stash_unstaged(path: String) -> Result<(), String> {
+    require_head(&path, "stash")?;
+    let (staged, unstaged) = tracked_change_flags(&path)?;
+    if !unstaged {
+        return Err("nothing unstaged to stash".to_string());
+    }
+    if !staged {
+        return git(&path, &["stash", "push"]).map(|_| ());
+    }
+    git(
+        &path,
+        &[
+            "-c",
+            "user.name=jkt",
+            "-c",
+            "user.email=jkt@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "--message",
+            "jkt: temporary index snapshot",
+        ],
+    )?;
+    let stashed = git(&path, &["stash", "push"]);
+    // the temp commit has to come off HEAD even when the stash failed, or the
+    // staged work would be left sitting in a commit the user never asked for
+    let restored = git(&path, &["reset", "--soft", "HEAD~1"]);
+    stashed?;
+    restored.map(|_| ())
+}
+
 #[tauri::command]
 async fn create_branch_checkout(path: String, name: String) -> Result<(), String> {
     git(&path, &["checkout", "-b", &name]).map(|_| ())
@@ -2393,6 +2489,9 @@ pub fn run() {
             stash_pop_at,
             stash_drop,
             stash_file,
+            discard_all,
+            discard_unstaged,
+            stash_unstaged,
             conflict_versions,
             resolve_take,
             resolve_write,

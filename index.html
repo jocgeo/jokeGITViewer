@@ -269,12 +269,26 @@
           </div>
 
           <div id="commit-panel" class="hidden">
-            <div class="cp-head">Working tree changes</div>
+            <div class="cp-head">
+              <span>Working tree changes</span>
+              <span class="cp-head-btns">
+                <button id="stash-all" class="mini"
+                  title="Stash every change, untracked files included&#10;git stash --include-untracked">Stash all</button>
+                <button id="delete-all" class="mini danger"
+                  title="Throw away every staged and unstaged change. Untracked files are kept&#10;git reset --hard HEAD">Delete all</button>
+              </span>
+            </div>
 
             <div class="cp-section">
               <div class="cp-title">
                 <span>Unstaged files (<span id="c-unstaged-n">0</span>)</span>
-                <button id="stage-all" class="mini">Stage all</button>
+                <span class="cp-title-btns">
+                  <button id="stage-all" class="mini">Stage all</button>
+                  <button id="stash-unstaged" class="mini"
+                    title="Stash the unstaged changes, keep the staged ones. Untracked files are kept&#10;git stash push">Stash</button>
+                  <button id="delete-unstaged" class="mini danger"
+                    title="Throw away the unstaged changes. Staged changes and untracked files are kept&#10;git checkout -- :/">Delete</button>
+                </span>
               </div>
               <ul id="c-unstaged" class="filelist"></ul>
             </div>

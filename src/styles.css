@@ -1779,10 +1779,19 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 
 /* commit panel */
 .cp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 10px;
 }
+/* buttons inherit the head's weight through `font: inherit` — keep them normal */
+.cp-head-btns, .cp-title-btns { display: flex; gap: 6px; flex: 0 0 auto; font-weight: 400; }
+/* destructive buttons wear the same red as "Discard hunk" */
+.mini.danger { border-color: #f85149; color: #ffa198; }
+.mini.danger:hover:not(:disabled) { background: rgba(248, 81, 73, 0.18); }
 .cp-section { margin-bottom: 12px; }
 .cp-title {
   display: flex;
