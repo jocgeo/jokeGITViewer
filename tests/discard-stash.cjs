@@ -13,11 +13,17 @@ function run(cmd, args, cwd = dir) {
 }
 // the commands under test, lifted straight out of lib.rs
 const lib = fs.readFileSync(path.join(__dirname, '../src-tauri/src/lib.rs'), 'utf8').replace(/\r\n/g, '\n');
-const block = lib
-  .slice(lib.indexOf('// ---- bulk discard / stash'), lib.indexOf('#[tauri::command]\nasync fn create_branch_checkout'))
-  .replace(/#\[tauri::command\]\n/g, '')
-  .replace(/async fn /g, 'fn ')
-  .trim();
+const strip = (text) => text.replace(/#\[tauri::command\]\n/g, '').replace(/async fn /g, 'fn ').trim();
+const block = strip(
+  lib.slice(
+    lib.indexOf('// ---- bulk discard / stash'),
+    lib.indexOf('#[tauri::command]\nasync fn create_branch_checkout')
+  )
+);
+// stash naming lives next to stash_push, and stash_unstaged calls into it
+const naming = strip(
+  lib.slice(lib.indexOf('// A stash the user named reads'), lib.indexOf('#[tauri::command]\nasync fn stash_pop('))
+);
 const rust = `use std::process::Command;
 fn git(path: &str, args: &[&str]) -> Result<String,String> {
  let o = Command::new("git").arg("-C").arg(path).args(args).output().unwrap();
@@ -27,13 +33,15 @@ fn git(path: &str, args: &[&str]) -> Result<String,String> {
  }
  Ok(String::from_utf8_lossy(&o.stdout).into())
 }
+${naming}
 ${block}
 fn main() {
  let a: Vec<String> = std::env::args().collect();
+ let message = a.get(3).cloned();
  let r = match a[1].as_str() {
   "discard_all" => discard_all(a[2].clone()),
   "discard_unstaged" => discard_unstaged(a[2].clone()),
-  "stash_unstaged" => stash_unstaged(a[2].clone()),
+  "stash_unstaged" => stash_unstaged(a[2].clone(), message),
   other => panic!("unknown command {other}"),
  };
  if let Err(e) = r { eprint!("{e}"); std::process::exit(1); }
@@ -50,8 +58,9 @@ const write = (name, text) => fs.writeFileSync(path.join(fixture, name), text);
 const read = (name) => fs.readFileSync(path.join(fixture, name), 'utf8');
 const status = (cwd = fixture) =>
   run('git', ['status', '--porcelain', '--untracked-files=all'], cwd).trim().split('\n').filter(Boolean).sort();
-const act = (command, cwd = fixture) => {
-  const r = cp.spawnSync(exe, [command, cwd], { cwd: dir, env, encoding: 'utf8' });
+const act = (command, cwd = fixture, message) => {
+  const args = [command, cwd, ...(message === undefined ? [] : [message])];
+  const r = cp.spawnSync(exe, args, { cwd: dir, env, encoding: 'utf8' });
   return { ok: r.status === 0, err: r.stderr };
 };
 // a.txt changed on both sides, b.txt in the worktree only, c.txt in the index
@@ -120,6 +129,26 @@ assert.equal(git('log', '--format=%s').trim(), 'root');
 git('stash', 'pop');
 assert.equal(read('b.txt'), 'only unstaged\n');
 console.log('PASS: stash unstaged reports an unchanged worktree and skips the temp commit when nothing is staged');
+
+// ---- the commit summary becomes the stash name ----
+git('stash', 'clear');
+dirty();
+assert.ok(act('stash_unstaged', fixture, 'tidy up the parser').ok);
+assert.match(git('stash', 'list'), /stash@\{0\}: On main: tidy up the parser/);
+git('stash', 'pop');
+// whatever was pasted in, a stash message is one line
+assert.ok(act('stash_unstaged', fixture, '  \n  first line  \nsecond line').ok);
+assert.match(git('stash', 'list'), /stash@\{0\}: On main: first line$/m);
+git('stash', 'pop');
+// nothing typed leaves git's own "WIP on ..." wording alone
+assert.ok(act('stash_unstaged', fixture, '   ').ok);
+assert.match(git('stash', 'list'), /stash@\{0\}: WIP on main:/);
+git('stash', 'pop');
+assert.deepEqual(status(), ['?? untracked.txt', 'M  c.txt', 'MM a.txt', ' M b.txt'].sort());
+console.log('PASS: a typed summary names the stash, trimmed to one line, and an empty one is left to git');
+git('stash', 'clear');
+assert.ok(act('discard_all').ok);
+fs.rmSync(path.join(fixture, 'untracked.txt'));
 
 // ---- a repository with no commits yet ----
 const unborn = path.join(dir, 'unborn');

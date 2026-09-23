@@ -6,7 +6,7 @@
   "scripts": {
     "test:layout": "node tests/diff-layout.cjs",
     "dev": "vite",
-    "test": "node tests/regressions.cjs && node tests/recovery.cjs && node tests/function-history.cjs && node tests/worktree-edit.cjs && node tests/stash-changes.cjs && node tests/worktree-close.cjs && node tests/checkout.cjs && node tests/remote-tags.cjs && node tests/discard-stash.cjs && node tests/edit-gutter.cjs",
+    "test": "node tests/regressions.cjs && node tests/recovery.cjs && node tests/function-history.cjs && node tests/worktree-edit.cjs && node tests/stash-changes.cjs && node tests/worktree-close.cjs && node tests/checkout.cjs && node tests/remote-tags.cjs && node tests/discard-stash.cjs && node tests/edit-gutter.cjs && node tests/commit-summary.cjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

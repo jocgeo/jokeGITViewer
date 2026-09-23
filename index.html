@@ -301,9 +301,13 @@
               <ul id="c-staged" class="filelist"></ul>
             </div>
 
-            <label class="cp-amend">
-              <input type="checkbox" id="c-amend" /> Amend previous commit
-            </label>
+            <div class="cp-amendrow">
+              <label class="cp-amend">
+                <input type="checkbox" id="c-amend" /> Amend previous commit
+              </label>
+              <span id="c-count" class="cp-count"
+                title="Characters left of the 50 a summary should keep to&#10;72 is the most any tool will show"></span>
+            </div>
             <input id="c-summary" class="cp-input" placeholder="Commit summary" />
             <textarea id="c-desc" class="cp-input cp-desc" placeholder="Description (optional)"></textarea>
             <button id="c-commit" class="cp-commit" disabled>Commit</button>

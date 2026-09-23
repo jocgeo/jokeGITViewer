@@ -3140,7 +3140,7 @@ async function refreshCommitFiles() {
               : `Stash ${basename(f.path)}`,
             action: () =>
               runAction(
-                invoke("stash_file", { path, file: f.path, stagedOnly }),
+                invoke("stash_file", { path, file: f.path, stagedOnly, message: stashMessage() }),
                 `Stashed ${f.path}`
               ),
           },
@@ -5317,9 +5317,30 @@ function updateWipButtons(unstagedAll: number) {
   enable("stash-all", (stagedCount > 0 || unstagedAll > 0) && hasHead);
 }
 
+const SUMMARY_SOFT = 50; // git's convention for a subject line
+const SUMMARY_HARD = 72; // where tools start cutting it off
+
+// Room left in the summary before it stops reading well in `git log --oneline`
+// and everywhere else a subject is shown. Over 50 it counts up instead, and
+// past 72 it turns red — neither one stops the commit.
+function updateSummaryCount() {
+  const len = ($("c-summary") as HTMLInputElement).value.length;
+  const over = len - SUMMARY_SOFT;
+  const el = $("c-count");
+  el.textContent = over > 0 ? `${over} over` : `${-over} left`;
+  el.classList.toggle("warn", over > 0 && len <= SUMMARY_HARD);
+  el.classList.toggle("bad", len > SUMMARY_HARD);
+}
+
+// a summary the user has typed doubles as the name of anything stashed here
+function stashMessage(): string | null {
+  return ($("c-summary") as HTMLInputElement).value.trim() || null;
+}
+
 function updateCommitEnabled() {
   const summary = ($("c-summary") as HTMLInputElement).value.trim();
   const amend = ($("c-amend") as HTMLInputElement).checked;
+  updateSummaryCount();
   ($("c-commit") as HTMLButtonElement).disabled = !(
     summary &&
     (stagedCount > 0 || amend)
@@ -5419,14 +5440,18 @@ async function doDiscardUnstaged() {
 async function doStashAll() {
   const t = wipTarget("stashing");
   if (!t) return;
-  runAction(invoke("stash_push", { path: t.repo.path }), "Stashed all changes", "stash-all");
+  runAction(
+    invoke("stash_push", { path: t.repo.path, message: stashMessage() }),
+    "Stashed all changes",
+    "stash-all"
+  );
 }
 
 async function doStashUnstaged() {
   const t = wipTarget("stashing");
   if (!t) return;
   runAction(
-    invoke("stash_unstaged", { path: t.repo.path }),
+    invoke("stash_unstaged", { path: t.repo.path, message: stashMessage() }),
     "Stashed unstaged changes",
     "stash-unstaged"
   );
@@ -6054,7 +6079,11 @@ async function doStashBtn() {
   const t = cur();
   if (!t || isBusy()) return;
   if (t.repo.conflict.active) { errorModal("Resolve the current conflict before stashing."); return; }
-  runAction(invoke("stash_push", { path: t.repo.path }), "Stashed changes", "stash-btn");
+  runAction(
+    invoke("stash_push", { path: t.repo.path, message: stashMessage() }),
+    "Stashed changes",
+    "stash-btn"
+  );
 }
 async function doTerminal() {
   const t = cur();

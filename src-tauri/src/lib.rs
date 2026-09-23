@@ -1669,11 +1669,31 @@ async fn pull(path: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-async fn stash_push(path: String) -> Result<(), String> {
+async fn stash_push(path: String, message: Option<String>) -> Result<(), String> {
     if git(&path, &["status", "--porcelain", "--untracked-files=all"])?.trim().is_empty() {
         return Err("nothing to stash".to_string());
     }
-    git(&path, &["stash", "--include-untracked"]).map(|_| ())
+    stash_with_name(&path, &["--include-untracked"], stash_name(&message).as_deref())
+}
+
+// A stash the user named reads as "On main: fix the parser" in the list instead
+// of "WIP on main: 1a2b3c <last commit>". The UI hands over whatever is sitting
+// in the commit summary field, so this takes the first non-empty line of it —
+// a stash message is one reflog line, no matter what was pasted in.
+fn stash_name(message: &Option<String>) -> Option<String> {
+    let first = message.as_deref()?.lines().find(|l| !l.trim().is_empty())?;
+    Some(first.trim().to_string())
+}
+
+// `git stash push`, with the name ahead of any pathspec so git still reads it
+fn stash_with_name(path: &str, extra: &[&str], name: Option<&str>) -> Result<(), String> {
+    let mut args = vec!["stash", "push"];
+    if let Some(n) = name {
+        args.push("--message");
+        args.push(n);
+    }
+    args.extend_from_slice(extra);
+    git(path, &args).map(|_| ())
 }
 
 #[tauri::command]
@@ -1707,9 +1727,14 @@ async fn stash_drop(path: String, selector: String) -> Result<(), String> {
 // pathspec-scoped, so nothing outside `file` is touched. It cannot be combined
 // with --staged, and an index entry never needs it.
 #[tauri::command]
-async fn stash_file(path: String, file: String, staged_only: bool) -> Result<(), String> {
+async fn stash_file(
+    path: String,
+    file: String,
+    staged_only: bool,
+    message: Option<String>,
+) -> Result<(), String> {
     let mode = if staged_only { "--staged" } else { "--include-untracked" };
-    git(&path, &["stash", "push", mode, "--", &file]).map(|_| ())
+    stash_with_name(&path, &[mode, "--", &file], stash_name(&message).as_deref())
 }
 
 // ---- bulk discard / stash of working tree changes ----
@@ -1775,14 +1800,15 @@ async fn discard_unstaged(path: String) -> Result<(), String> {
 // lets it apply cleanly later — on pop the unstaged work lands back on top of
 // the still-staged work. No --include-untracked, so untracked files stay put.
 #[tauri::command]
-async fn stash_unstaged(path: String) -> Result<(), String> {
+async fn stash_unstaged(path: String, message: Option<String>) -> Result<(), String> {
     require_head(&path, "stash")?;
     let (staged, unstaged) = tracked_change_flags(&path)?;
     if !unstaged {
         return Err("nothing unstaged to stash".to_string());
     }
+    let name = stash_name(&message);
     if !staged {
-        return git(&path, &["stash", "push"]).map(|_| ());
+        return stash_with_name(&path, &[], name.as_deref());
     }
     git(
         &path,
@@ -1800,7 +1826,7 @@ async fn stash_unstaged(path: String) -> Result<(), String> {
             "jkt: temporary index snapshot",
         ],
     )?;
-    let stashed = git(&path, &["stash", "push"]);
+    let stashed = stash_with_name(&path, &[], name.as_deref());
     // the temp commit has to come off HEAD even when the stash failed, or the
     // staged work would be left sitting in a commit the user never asked for
     let restored = git(&path, &["reset", "--soft", "HEAD~1"]);
