@@ -1592,6 +1592,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #dvf-count { font-size: 11px; color: var(--muted); min-width: 40px; text-align: center; }
 ::highlight(dvf) { background: rgba(255, 213, 79, 0.35); }
+/* every other place the marked word appears */
+::highlight(selword) { background: rgba(109, 179, 255, 0.22); }
 ::highlight(dvf-cur) { background: #ffd54f; color: #1a1a24; }
 
 /* image change preview */

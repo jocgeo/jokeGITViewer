@@ -71,6 +71,7 @@ const source = fs.readFileSync(path.join(sourceRoot,'src/main.ts'),'utf8');
   let paints = 0;
   const ctx = {
     $: element, gctx: { graphLeft: 0 }, dvfClose() {}, syncWorktreeView() {},
+    clearWordHighlight() {},
     paintViewport() { paints++; },
     document: {
       getElementById: () => ({ getBoundingClientRect: () => ({ left: 20 }) }),

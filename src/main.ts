@@ -3171,6 +3171,7 @@ function restoreGraphLayout() {
 }
 
 function showDiffView(on: boolean) {
+  clearWordHighlight(); // the marked word belongs to the view being left
   syncWorktreeView(on);
   openFileStamp = ""; // re-baseline: a different file isn't an edit
   $("mergeview").classList.add("hidden");
@@ -3184,6 +3185,7 @@ function showDiffView(on: boolean) {
   dvfClose(); // view content changes — stale find results would mislead
 }
 function showMergeView(on: boolean) {
+  clearWordHighlight();
   syncWorktreeView(false);
   $("diffview").classList.add("hidden");
   $("mergeview").classList.toggle("hidden", !on);
@@ -4462,6 +4464,130 @@ function dvfPaintMinimap() {
     });
     map.appendChild(mark);
   }
+}
+
+// ---- mark a word, see everywhere else it appears ----
+// The find bar without the bar: whatever is selected in a view that shows file
+// contents is lit up wherever else it occurs, exactly — same characters, same
+// word, so a name only matches when it stands on its own. Unlike the find bar
+// this does not fold case: it is meant for following one symbol, and COUNT is
+// not count. Only the code columns take part — line numbers, blame columns and
+// the editor gutter are chrome, and matching them would be noise.
+const WORD_VIEWS = "#diffview-body, #worktree-body, #mergeview-body";
+const WORD_CONTENT = ".dc, .plc, .cpc, #dv-edithl, #worktree-edit-highlight";
+// A textarea's selection is not a DOM range and cannot be painted into, so for
+// the two editors the marks go on the highlighted layer lying behind it. With
+// highlighting off (unknown language, very large file) that layer is empty and
+// nothing lights up — the same trade the editor already makes for its colours.
+const WORD_LAYERS: Record<string, string> = {
+  "dv-edit": "dv-edithl",
+  "worktree-editor": "worktree-edit-highlight",
+};
+const WORD_MIN = 2; // a single character would light up half the file
+const WORD_MAX = 200;
+const WORD_CAP = 2000; // same sanity cap the find bar uses
+let wordQuery = ""; // what is lit right now — saves re-walking for the same word
+let wordRoot: HTMLElement | null = null;
+let wordTimer = 0;
+
+function highlightRegistry(): Map<string, unknown> | null {
+  return (CSS as unknown as { highlights?: Map<string, unknown> }).highlights ?? null;
+}
+
+function clearWordHighlight() {
+  if (!wordQuery) return;
+  wordQuery = "";
+  wordRoot = null;
+  highlightRegistry()?.delete("selword");
+}
+
+// what the user marked, and the element whose text is searched for it
+function markedWord(): { root: HTMLElement; query: string } | null {
+  const active = document.activeElement;
+  if (active instanceof HTMLTextAreaElement) {
+    const layer = WORD_LAYERS[active.id];
+    const root = layer ? document.getElementById(layer) : null;
+    if (!root) return null;
+    return { root, query: active.value.slice(active.selectionStart, active.selectionEnd) };
+  }
+  const selection = document.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const node = selection.getRangeAt(0).startContainer;
+  const from = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode) as Element | null;
+  const root = from?.closest(WORD_VIEWS) as HTMLElement | null;
+  return root ? { root, query: selection.toString() } : null;
+}
+
+// a word, not a stray character and not half the file
+function isMarkableWord(query: string): boolean {
+  return query.length >= WORD_MIN && query.length <= WORD_MAX && !/[\r\n]/.test(query);
+}
+
+function refreshWordHighlight() {
+  const marked = markedWord();
+  const query = marked ? marked.query.trim() : "";
+  if (!marked || !isMarkableWord(query)) {
+    clearWordHighlight();
+    return;
+  }
+  if (query === wordQuery && marked.root === wordRoot) return;
+  const HL = (window as unknown as { Highlight?: new (...r: Range[]) => { priority: number } })
+    .Highlight;
+  const registry = highlightRegistry();
+  if (!HL || !registry) return; // no Custom Highlight API — nothing to paint with
+  wordQuery = query;
+  wordRoot = marked.root;
+  const highlight = new HL(...wordMatches(marked.root, query));
+  highlight.priority = -1; // a find match on the same word stays on top
+  registry.set("selword", highlight);
+}
+
+// anything that can be part of one name, including non-ASCII letters
+const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+
+// Offsets of every exact occurrence of `query` in `text`. Exact means the same
+// characters and the same word: a hit inside a longer name is a different name,
+// so marking pThis leaves gpThisAnalog alone. Only the ends where the selection
+// itself is part of a name are guarded — marking "pThis->" would otherwise
+// demand a name character after the arrow and never match.
+function wordSpans(text: string, query: string): number[] {
+  const guardStart = WORD_CHAR.test(query[0]);
+  const guardEnd = WORD_CHAR.test(query[query.length - 1]);
+  const out: number[] = [];
+  let i = 0;
+  while ((i = text.indexOf(query, i)) !== -1) {
+    const before = i > 0 ? text[i - 1] : "";
+    const after = text[i + query.length] ?? "";
+    if (
+      (!guardStart || !WORD_CHAR.test(before)) &&
+      (!guardEnd || !WORD_CHAR.test(after))
+    ) {
+      out.push(i);
+      i += query.length;
+    } else {
+      i += 1; // a rejected hit can still overlap a real one
+    }
+  }
+  return out;
+}
+
+function wordMatches(root: HTMLElement, query: string): Range[] {
+  const ranges: Range[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) =>
+      n.parentElement?.closest(WORD_CONTENT) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+  });
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    for (const start of wordSpans(node.textContent ?? "", query)) {
+      const range = new Range();
+      range.setStart(node, start);
+      range.setEnd(node, start + query.length);
+      ranges.push(range);
+      if (ranges.length >= WORD_CAP) return ranges;
+    }
+  }
+  return ranges;
 }
 
 let diffFull = false; // commit diff view: false = hunks only, true = whole file
@@ -6939,6 +7065,18 @@ window.addEventListener("click", (e) => {
   closeMenu();
   if (!(e.target as HTMLElement).closest(".search-box, #search-btn")) closeSearch();
 });
+// Marking a word lights it up across the view. A drag fires these constantly,
+// so the walk waits for the selection to settle.
+const scheduleWordHighlight = () => {
+  clearTimeout(wordTimer);
+  wordTimer = window.setTimeout(refreshWordHighlight, 120);
+};
+document.addEventListener("selectionchange", scheduleWordHighlight);
+// a textarea's selection does not always reach selectionchange
+document.addEventListener("select", scheduleWordHighlight, true);
+document.addEventListener("mouseup", scheduleWordHighlight, true);
+document.addEventListener("keyup", scheduleWordHighlight, true);
+
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
     e.preventDefault();
