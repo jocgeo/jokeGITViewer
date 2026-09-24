@@ -76,6 +76,7 @@ pub struct Submodule {
 
 #[derive(Serialize)]
 pub struct RepoData {
+    remotes: Vec<String>,
     path: String,
     head: String,        // current commit hash (empty if none)
     head_branch: String, // current branch short name (empty if detached)
@@ -801,6 +802,7 @@ async fn open_repo(path: String, limit: Option<u32>) -> Result<RepoData, String>
 
     let worktrees = worktrees::list(&path)?;
     Ok(RepoData {
+        remotes: git_ro(&path, &["remote"])?.lines().map(str::to_string).collect(),
         path,
         head,
         head_branch,

@@ -43,6 +43,7 @@ export interface Worktree {
   kept_reason?: string;
 }
 export interface RepoData {
+  remotes?: string[];
   worktrees?: Worktree[];
   path: string;
   head: string;

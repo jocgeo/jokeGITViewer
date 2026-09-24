@@ -919,6 +919,31 @@ function renderSidebar(t: Tab) {
           `<span class="rname">${escapeHtml(g.name)}</span>` +
           `<span class="gcount">${countRefs(g)}</span>`;
         gli.title = g.path;
+        if (kind === "local" || kind === "remote") {
+          const keys = list.filter(r => r.name.startsWith(`${g.path}/`)).map(refKey);
+          const allHidden = keys.every(k => t.hidden?.has(k));
+          const someHidden = keys.some(k => t.hidden?.has(k));
+          gli.classList.toggle("branch-hidden", allHidden);
+          const eye = document.createElement("button");
+          eye.type = "button";
+          eye.className = "eye folder-eye";
+          eye.title = `${allHidden ? "Show" : "Hide"} all branches in this folder ${allHidden ? "in" : "from"} graph`;
+          eye.setAttribute("aria-label", `${eye.title}: ${g.path}`);
+          eye.setAttribute("aria-pressed", allHidden ? "true" : someHidden ? "mixed" : "false");
+          eye.innerHTML = icon(allHidden ? "eyeoff" : "eye");
+          eye.addEventListener("click", e => {
+            e.stopPropagation();
+            t.hidden ??= new Set();
+            for (const k of keys) {
+              if (allHidden) t.hidden.delete(k); else t.hidden.add(k);
+            }
+            t.nodes = buildNodes(t.repo, t.hidden);
+            renderGraph(t);
+            renderSidebar(t);
+          });
+          eye.addEventListener("dblclick", e => e.stopPropagation());
+          gli.appendChild(eye);
+        }
         gli.addEventListener("click", (e) => {
           e.stopPropagation();
           toggleCollapsedGroup(key);
@@ -5991,6 +6016,8 @@ async function refreshOpenFileView() {
 
 // enable/disable + tooltip the top toolbar based on repo state
 function setToolbar(repo: RepoData | null) {
+  $("add-remote-btn").classList.toggle("hidden", !repo || repo.remotes?.length !== 0);
+  ($("add-remote-btn") as HTMLButtonElement).disabled = isBusy();
   const set = (id: string, disabled: boolean, title?: string) => {
     const b = document.getElementById(id) as HTMLButtonElement | null;
     if (!b) return; // button may not exist
@@ -6006,11 +6033,12 @@ function setToolbar(repo: RepoData | null) {
   const br = repo.head_branch;
   const detached = !br;
   const conflict = repo.conflict.active;
-  set("fetch-btn", conflict);
+  const noRemote = repo.remotes?.length === 0;
+  set("fetch-btn", conflict || noRemote, noRemote ? "Add a remote first" : "Fetch all remotes and prune deleted branches");
   set(
     "pull-btn",
-    detached || conflict,
-    conflict
+    detached || conflict || noRemote,
+    noRemote ? "Add a remote first" : conflict
       ? "Resolve the conflict first"
       : detached
       ? "Pull unavailable — detached HEAD"
@@ -6018,8 +6046,8 @@ function setToolbar(repo: RepoData | null) {
   );
   set(
     "push-btn",
-    detached || conflict,
-    conflict
+    detached || conflict || noRemote || !repo.head,
+    noRemote ? "Add a remote first" : !repo.head ? "Create your first commit before pushing" : conflict
       ? "Resolve the conflict first"
       : detached
       ? "Push unavailable — detached HEAD"
@@ -7060,6 +7088,19 @@ function avatarUrl(key: string): string {
 }
 window.addEventListener("DOMContentLoaded", () => {
   $("open-btn").addEventListener("click", openRepo);
+  $("add-remote-btn").addEventListener("click", () => {
+    const t = cur();
+    if (!t || isBusy()) return;
+    showRemoteManager(t.repo.path, async () => {
+      t.stale = true;
+      t.remoteTags = undefined;
+      t.remoteTagsRemote = undefined;
+      if (cur() === t) {
+        await reloadActive("Remote added — use Fetch to download branches, or Push after your first commit");
+        void syncRepoHost();
+      }
+    });
+  });
   $("settings-btn").addEventListener("click", (e) => {
     e.stopPropagation(); // Keep the opening click from reaching the global menu dismiss handler.
     const bounds = $("settings-btn").getBoundingClientRect();

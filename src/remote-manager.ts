@@ -54,7 +54,7 @@ export function showRemoteManager(path: string, onChanged: () => Promise<void>) 
     const settings = await invoke<Settings>("remote_settings", { path });
     if (dialog.isConnected) render(settings);
   }
-  async function run(action: () => Promise<unknown>, message: string, changed = true) {
+  async function run(action: () => Promise<unknown>, message: string, changed = true, preserveInputsOnError = false) {
     if (busy) return;
     setBusy(true); status.textContent = "Working…";
     try {
@@ -66,7 +66,9 @@ export function showRemoteManager(path: string, onChanged: () => Promise<void>) 
       }
     } catch (e) {
       // A multi-step Git operation can partially succeed; show the actual state.
-      try { await refresh(); } catch { /* retain the original error */ }
+      if (!preserveInputsOnError) {
+        try { await refresh(); } catch { /* retain the original error */ }
+      }
       status.textContent = `Could not complete the action: ${String(e)}`;
     } finally { setBusy(false); }
   }
@@ -110,9 +112,21 @@ export function showRemoteManager(path: string, onChanged: () => Promise<void>) 
     if (!settings.remotes.length) text(content, "This repository has no remotes yet.");
     const add = document.createElement("section"); add.className = "rm-card";
     const title = document.createElement("h3"); title.textContent = "Add remote"; add.append(title);
-    const name = input(add, "Name"); name.placeholder = "origin";
-    const url = input(add, "URL or local repository path");
-    add.append(button("Add remote", () => manage("add", name.value.trim(), url.value, "Remote added.")));
+    const name = input(add, "Remote name", settings.remotes.length ? "" : "origin"); name.placeholder = "origin";
+    const url = input(add, "Git URL (SSH or HTTPS)");
+    url.placeholder = "git@github.com:owner/repository.git";
+    text(add, "Paste the SSH clone URL from your Git host. ssh://git@host:port/path.git is also supported. SSH uses your existing keys and agent.");
+    const submit = () => {
+      if (!name.value.trim() || !url.value.trim()) {
+        status.textContent = "Enter a remote name and Git URL.";
+        (name.value.trim() ? url : name).focus();
+        return;
+      }
+      void run(() => invoke("remote_manage", { path, action: "add", name: name.value.trim(), input: url.value.trim() }),
+        "Remote added. Use Fetch remote branches to connect, or make your first commit and Push to publish. The first push sets the upstream automatically.", true, true);
+    };
+    add.append(button("Add remote", submit));
+    url.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
     content.append(add);
 
     const branch = document.createElement("section"); branch.className = "rm-card";

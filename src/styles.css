@@ -643,6 +643,9 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .reflist li:hover .eye { opacity: .7; }
 .reflist .eye:hover { opacity: 1; color: var(--fg); }
+.reflist button.folder-eye { padding: 0; border: 0; background: transparent; border-radius: 2px; }
+.reflist button.folder-eye:focus-visible { opacity: 1; outline: 1px solid var(--accent); }
+.reflist button.folder-eye[aria-pressed="mixed"] { opacity: .7; }
 .reflist li.branch-hidden { opacity: .3; }
 .reflist li.dragging { opacity: .5; }
 .reflist li.drop-target {
