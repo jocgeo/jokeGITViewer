@@ -6368,6 +6368,18 @@ function commitMenu(
   return items;
 }
 
+// A stash message carries where it came from — "On main: fix the parser", or
+// "WIP on main: 1a2b3c <last commit>" when it was never named. The branch part
+// is worth keeping, so only the name after it is handed to the user to edit,
+// and what comes back reads like any stash that was named when it was made.
+const STASH_PREFIX = /^(?:WIP on|On) ([^:]+): /;
+function splitStashName(message: string): { prefix: string; name: string } {
+  const m = STASH_PREFIX.exec(message);
+  return m
+    ? { prefix: `On ${m[1]}: `, name: message.slice(m[0].length) }
+    : { prefix: "", name: message };
+}
+
 function stashMenu(s: StashEntry, repo: RepoData): MenuItem[] {
   const path = repo.path;
   const sel = s.selector;
@@ -6381,6 +6393,18 @@ function stashMenu(s: StashEntry, repo: RepoData): MenuItem[] {
       action: () => runAction(invoke("stash_pop_at", { path, selector: sel }), `Popped ${sel}`),
     },
     { separator: true },
+    {
+      label: `Rename ${sel}`,
+      action: async () => {
+        const { prefix, name } = splitStashName(s.message);
+        const next = await promptModal(`Rename ${sel}`, "Stash name", name);
+        if (!next || next === name) return;
+        runAction(
+          invoke("stash_rename", { path, selector: sel, hash: s.hash, message: prefix + next }),
+          `Renamed ${sel}`
+        );
+      },
+    },
     {
       label: `Delete ${sel}`,
       action: async () => {

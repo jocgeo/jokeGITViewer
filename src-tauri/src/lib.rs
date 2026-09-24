@@ -1737,6 +1737,55 @@ async fn stash_file(
     stash_with_name(&path, &[mode, "--", &file], stash_name(&message).as_deref())
 }
 
+// Renaming a stash is not something git does: the name IS the reflog message of
+// refs/stash, and no command rewrites one in place. `git stash store` with a new
+// message plus a drop of the old entry would work, but it lands the stash back
+// on top and reshuffles the list under the user's hands, so this edits the one
+// reflog line instead. The format is fixed and one line per entry, oldest first:
+//
+//   <old-sha> <new-sha> <who> <time> <tz>\t<message>
+//
+// Only the text after the tab is touched. The entry's own hash is checked first,
+// so a list that moved in the meantime is refused instead of mislabelled, and
+// the file is replaced rather than written over, so a crash cannot truncate it.
+#[tauri::command]
+async fn stash_rename(
+    path: String,
+    selector: String,
+    hash: String,
+    message: String,
+) -> Result<(), String> {
+    let name = stash_name(&Some(message)).ok_or("A stash needs a name.")?;
+    let index: usize = selector
+        .trim()
+        .trim_start_matches("stash@{")
+        .trim_end_matches('}')
+        .parse()
+        .map_err(|_| format!("{selector} is not a stash."))?;
+    let relative = git(&path, &["rev-parse", "--git-path", "logs/refs/stash"])?;
+    let log = Path::new(&path).join(relative.trim());
+    let raw = std::fs::read_to_string(&log).map_err(|e| format!("Cannot read the stash log: {e}"))?;
+    let mut lines: Vec<&str> = raw.lines().collect();
+    // stash@{0} is the newest, which is the LAST line of the log
+    let target = lines
+        .len()
+        .checked_sub(index + 1)
+        .ok_or("That stash is no longer in the list.")?;
+    let (head, _) = lines[target]
+        .split_once('\t')
+        .ok_or("The stash log is not in the expected format.")?;
+    if head.split(' ').nth(1) != Some(hash.as_str()) {
+        return Err("The stash list has changed. Reload and try again.".to_string());
+    }
+    let replacement = format!("{head}\t{name}");
+    lines[target] = replacement.as_str();
+    let mut out = lines.join("\n");
+    out.push('\n');
+    let tmp = log.with_extension("jkt-rename");
+    std::fs::write(&tmp, out).map_err(|e| format!("Cannot write the stash log: {e}"))?;
+    std::fs::rename(&tmp, &log).map_err(|e| format!("Cannot replace the stash log: {e}"))
+}
+
 // ---- bulk discard / stash of working tree changes ----
 //
 // "unstaged" here means what the commit panel lists as unstaged MINUS untracked
@@ -2515,6 +2564,7 @@ pub fn run() {
             stash_pop_at,
             stash_drop,
             stash_file,
+            stash_rename,
             discard_all,
             discard_unstaged,
             stash_unstaged,
