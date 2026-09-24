@@ -520,12 +520,18 @@ function switchTab(i: number) {
   if (t && !t.remoteTags) refreshRemoteTags(t);
   if (t && t.stale) reloadActive(); // refresh cached tab on first view
   if (t) void initialFetch(t.repo.path);
+  if (t) warmSymbolIndex(t.repo.path);
   void cleanupPreviousWorktree(previous);
 }
 
 function closeTab(i: number) {
   const previous = cur();
+  const closed = tabs[i]?.repo.path;
   tabs.splice(i, 1);
+  if (closed && !tabs.some((t) => repoPathKey(t.repo.path) === repoPathKey(closed))) {
+    indexedRepos.delete(repoPathKey(closed));
+    void invoke("symbol_forget", { path: closed }); // give the memory back
+  }
   if (tabs.length === 0) {
     active = -1;
   } else if (active >= tabs.length) {
@@ -2926,6 +2932,7 @@ async function loadRepo(path: string, silent = false, parentPath?: string) {
     saveRepoCache(path, repo);
     refreshRemoteTags(tab);
     void initialFetch(path); // the graph is already up; refresh it in the background
+    warmSymbolIndex(path); // ready for the first Ctrl+Click
     void cleanupPreviousWorktree(previous);
   } catch (e) {
     setStatus("");
@@ -3028,6 +3035,7 @@ async function restoreSession() {
     refreshRemoteTags(t);
     if (t.stale) reloadActive(); // refresh the visible tab in the background
     void initialFetch(t.repo.path);
+    warmSymbolIndex(t.repo.path);
     void cleanupPreviousWorktree(null);
   }
 }
@@ -4588,6 +4596,223 @@ function wordMatches(root: HTMLElement, query: string): Range[] {
     }
   }
   return ranges;
+}
+
+// ---- go to definition ----
+// The index in the backend knows where every name is declared; this is the
+// gesture side of it. Ctrl+Click follows the name under the pointer: to the
+// local or parameter when the click is inside the function that declares it,
+// to the definition otherwise, and from a function's implementation to its
+// declaration and back again. Alt+← (or the mouse's back button) returns.
+interface SymbolHit {
+  name: string;
+  kind: string;
+  file: string;
+  line: number;
+  text: string;
+  scope: string;
+  rank: number; // equal ranks mean the choice is genuinely the user's
+}
+
+const indexedRepos = new Set<string>();
+const jumpBack: { label: string; run: () => void | Promise<void> }[] = [];
+
+// Build the index in the background, so the first Ctrl+Click does not wait for
+// a whole repository to be read. Later passes only re-read what changed.
+function warmSymbolIndex(path: string) {
+  const key = repoPathKey(path);
+  if (indexedRepos.has(key)) return;
+  indexedRepos.add(key);
+  void invoke("symbol_index", { path }).catch(() => indexedRepos.delete(key));
+}
+
+function caretAt(x: number, y: number): { node: Node; offset: number } | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  const range = doc.caretRangeFromPoint?.(x, y);
+  if (range) return { node: range.startContainer, offset: range.startOffset };
+  const position = doc.caretPositionFromPoint?.(x, y);
+  return position ? { node: position.offsetNode, offset: position.offset } : null;
+}
+
+// The name around an offset in a string — a bare number is not a name. The
+// caret may sit just past the last letter (clicking the right half of it puts
+// it there), but not past the text itself.
+function wordAround(text: string, at: number): { word: string; start: number } | null {
+  if (at < 0 || at > text.length) return null;
+  let start = at;
+  while (start > 0 && WORD_CHAR.test(text[start - 1])) start--;
+  let end = start;
+  while (end < text.length && WORD_CHAR.test(text[end])) end++;
+  const word = text.slice(start, end);
+  if (!word || /^[0-9]+$/.test(word) || word.length > 120) return null;
+  return { word, start };
+}
+
+// which file the view under the pointer is showing, and in which repo
+function viewFile(el: Element | null): { path: string; file: string } | null {
+  if (el?.closest("#worktree-body")) {
+    return worktreeView?.file ? { path: worktreeView.path, file: worktreeView.file } : null;
+  }
+  const path = diffCtx?.path ?? cur()?.repo.path;
+  if (!path) return null;
+  if (el?.closest("#mergeview-body")) return mvFile ? { path, file: mvFile } : null;
+  return diffCtx?.file ? { path, file: diffCtx.file } : null;
+}
+
+// the file line a rendered row stands for
+function lineOf(el: Element | null): number {
+  const row = el?.closest<HTMLElement>("[data-ln]");
+  if (row?.dataset.ln) return Number(row.dataset.ln) || 0;
+  const numbered = el?.closest(".dl, .ml, .bl, .pl, .cprow");
+  return Number(numbered?.querySelector(".ln")?.textContent?.trim()) || 0;
+}
+
+// The name the pointer is on and where it sits, from a rendered view or from
+// one of the editors — whose text lives in a textarea, not in the DOM.
+function symbolAtPoint(
+  x: number,
+  y: number,
+  target: Element | null
+): { word: string; path: string; file: string; line: number } | null {
+  const where = viewFile(target);
+  if (!where) return null;
+  if (target instanceof HTMLTextAreaElement) {
+    if (!WORD_LAYERS[target.id]) return null;
+    const found = wordAround(target.value, target.selectionStart);
+    if (!found) return null;
+    let line = target.value.slice(0, found.start).split("\n").length;
+    // the worktree editor holds a slice of the file, not the whole of it
+    if (target.id === "worktree-editor" && worktreeView?.source && worktreeView.range) {
+      line += worktreeView.source.slice(0, worktreeView.range.start).split("\n").length - 1;
+    }
+    return { word: found.word, line, ...where };
+  }
+  const caret = caretAt(x, y);
+  if (!caret || caret.node.nodeType !== Node.TEXT_NODE) return null;
+  const parent = caret.node.parentElement;
+  if (!parent?.closest(WORD_CONTENT)) return null;
+  const found = wordAround(caret.node.textContent ?? "", caret.offset);
+  if (!found) return null;
+  return { word: found.word, line: lineOf(parent), ...where };
+}
+
+// open a file from the working tree and put a line in the middle of the view
+async function openFileAt(path: string, file: string, line: number) {
+  diffCtx = { path, file, hash: null };
+  lastView = () => openFileAt(path, file, line);
+  showDiffView(true);
+  await renderPlainView();
+  const row = $("diffview-body").querySelector<HTMLElement>(`.pl[data-ln="${line}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: "center" });
+  row.classList.add("jumped");
+  window.setTimeout(() => row.classList.remove("jumped"), 1500);
+}
+
+async function jumpToHit(path: string, hit: SymbolHit) {
+  const from = lastView;
+  const label = diffCtx ? `${diffCtx.file}` : "";
+  if (from) jumpBack.push({ label, run: from });
+  if (jumpBack.length > 40) jumpBack.shift();
+  await openFileAt(path, hit.file, hit.line);
+  setStatus(
+    `${hit.kind} ${hit.name} — ${hit.file}:${hit.line}` +
+      (jumpBack.length ? "  ·  Alt+← to go back" : "")
+  );
+}
+
+async function goToDefinition(x: number, y: number, target: Element | null) {
+  const at = symbolAtPoint(x, y, target);
+  if (!at) return;
+  let hits: SymbolHit[];
+  try {
+    setStatus(`Looking up ${at.word}…`);
+    hits = await invoke<SymbolHit[]>("symbol_lookup", {
+      path: at.path,
+      name: at.word,
+      file: at.file,
+      line: at.line,
+    });
+  } catch (e) {
+    setStatus("");
+    errorModal("Symbol lookup failed:\n" + String(e));
+    return;
+  }
+  if (!hits.length) {
+    setStatus(`No definition found for "${at.word}"`);
+    return;
+  }
+  // Follow the best answer when there is one. When the top candidates are
+  // equally good — two statics of the same name, say — that is a real choice
+  // and the user makes it.
+  if (hits.length > 1 && hits[1].rank === hits[0].rank) {
+    setStatus(`${hits.length} places define ${at.word}`);
+    showMenu(
+      x,
+      y,
+      hits.slice(0, 12).map((h) => ({
+        label: `${h.kind} · ${h.file}:${h.line}${h.scope ? ` (in ${h.scope})` : ""}`,
+        action: () => void jumpToHit(at.path, h),
+      }))
+    );
+    return;
+  }
+  await jumpToHit(at.path, hits[0]);
+}
+
+function goBackFromJump() {
+  const previous = jumpBack.pop();
+  if (!previous) {
+    setStatus("Nothing to go back to");
+    return;
+  }
+  void previous.run();
+  setStatus(previous.label ? `Back to ${previous.label}` : "Back");
+}
+
+// Ctrl held over a name: underline it, the way an editor does, so it is clear
+// what a click would follow before the click happens.
+//
+// The underline is a strip laid over the word rather than a custom highlight:
+// the marked-word highlight may already be covering the same text, and one box
+// on top of it needs no styling rules of its own to stay out of that way.
+let hoverKey = "";
+function paintHoverWord(x: number, y: number, target: Element | null) {
+  const caret = caretAt(x, y);
+  const parent = caret?.node.parentElement;
+  if (!caret || caret.node.nodeType !== Node.TEXT_NODE || !parent?.closest(WORD_CONTENT)) {
+    clearHoverWord();
+    return;
+  }
+  const found = wordAround(caret.node.textContent ?? "", caret.offset);
+  if (!found) {
+    clearHoverWord();
+    return;
+  }
+  const key = `${found.start}:${found.word}:${lineOf(parent)}`;
+  if (key === hoverKey) return;
+  hoverKey = key;
+  const range = new Range();
+  range.setStart(caret.node, found.start);
+  range.setEnd(caret.node, found.start + found.word.length);
+  const box = range.getBoundingClientRect();
+  const strip = $("goto-underline");
+  strip.style.left = `${box.left}px`;
+  strip.style.top = `${box.bottom - 1}px`;
+  strip.style.width = `${box.width}px`;
+  strip.classList.remove("hidden");
+  document.body.classList.add("goto-armed");
+  void target;
+}
+
+function clearHoverWord() {
+  if (!hoverKey) return;
+  hoverKey = "";
+  $("goto-underline").classList.add("hidden");
+  document.body.classList.remove("goto-armed");
 }
 
 let diffFull = false; // commit diff view: false = hunks only, true = whole file
@@ -7072,12 +7297,51 @@ const scheduleWordHighlight = () => {
   wordTimer = window.setTimeout(refreshWordHighlight, 120);
 };
 document.addEventListener("selectionchange", scheduleWordHighlight);
+
+// Ctrl+Click follows a name to where it is declared; Ctrl alone underlines
+// whatever the pointer is on, so it is clear what a click would follow.
+document.addEventListener(
+  "click",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.button !== 0) return;
+    const target = e.target as Element | null;
+    if (!target?.closest(WORD_VIEWS)) return;
+    e.preventDefault();
+    clearHoverWord();
+    void goToDefinition(e.clientX, e.clientY, target);
+  },
+  true
+);
+document.addEventListener("mousemove", (e) => {
+  const target = e.target as Element | null;
+  if ((e.ctrlKey || e.metaKey) && target?.closest(WORD_VIEWS)) {
+    paintHoverWord(e.clientX, e.clientY, target);
+  } else {
+    clearHoverWord();
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === "Control" || e.key === "Meta") clearHoverWord();
+});
+window.addEventListener("blur", clearHoverWord);
+// the mouse's own back button, like a browser
+document.addEventListener("mouseup", (e) => {
+  if (e.button === 3) {
+    e.preventDefault();
+    goBackFromJump();
+  }
+});
 // a textarea's selection does not always reach selectionchange
 document.addEventListener("select", scheduleWordHighlight, true);
 document.addEventListener("mouseup", scheduleWordHighlight, true);
 document.addEventListener("keyup", scheduleWordHighlight, true);
 
 window.addEventListener("keydown", (e) => {
+  if (e.altKey && e.key === "ArrowLeft") {
+    e.preventDefault();
+    goBackFromJump();
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
     e.preventDefault();
     // file view open -> find inside the file; otherwise repo-wide search

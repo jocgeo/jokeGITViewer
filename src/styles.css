@@ -1594,6 +1594,20 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 ::highlight(dvf) { background: rgba(255, 213, 79, 0.35); }
 /* every other place the marked word appears */
 ::highlight(selword) { background: rgba(109, 179, 255, 0.22); }
+/* the name Ctrl+Click would follow, underlined by a strip laid over it */
+#goto-underline {
+  position: fixed;
+  height: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 50;
+}
+body.goto-armed .dc,
+body.goto-armed .plc,
+body.goto-armed .cpc { cursor: pointer; }
+/* where a jump landed — a moment of colour, then back to normal */
+.pl.jumped { background: rgba(109, 179, 255, 0.22); }
+.pl.jumped .plc { transition: background 1.2s ease-out; }
 ::highlight(dvf-cur) { background: #ffd54f; color: #1a1a24; }
 
 /* image change preview */

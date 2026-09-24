@@ -11,6 +11,7 @@ mod remote_manager;
 mod worktrees;
 mod requests;
 mod git_lock;
+mod symbols;
 
 #[derive(Serialize)]
 pub struct Commit {
@@ -2565,6 +2566,9 @@ pub fn run() {
             stash_drop,
             stash_file,
             stash_rename,
+            symbols::symbol_index,
+            symbols::symbol_lookup,
+            symbols::symbol_forget,
             discard_all,
             discard_unstaged,
             stash_unstaged,
