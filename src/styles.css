@@ -1,16 +1,30 @@
 :root {
   color-scheme: dark;
-  --scroll-track: #1a1a25;
-  --scroll-thumb: #505069;
-  --scroll-thumb-hover: #71718e;
-  --bg: #1e1e2a;
-  --bg2: #262635;
-  --bg3: #2f2f42;
-  --fg: #e6e6f0;
-  --muted: #9a9ab0;
-  --border: #3a3a50;
-  --accent: #6db3ff;
-  --sel: #364066;
+  /* Neutral graphite, after GitKraken's dark theme: the graph sits on the
+     darkest chrome, panels a step up, raised controls a step above that, and
+     teal is the one accent. No blue/purple cast in the greys. */
+  --scroll-track: #17191d;
+  --scroll-thumb: #3e4044;
+  --scroll-thumb-hover: #55585f;
+  --bg: #17191d; /* the graph, and the ground code sits on */
+  --bg2: #272a31;
+  --bg3: #33373f;
+  --bar: #2a2d34; /* the tab strip, between the toolbar and the panels */
+  --fg: #d6d7d9;
+  --muted: #85878b;
+  --border: #3a3d43;
+  --accent: #22a6c4;
+  --sel: #212939;
+  /* Graph and code share one dark ground, below the chrome around them.
+     The diff tints are solid and low: changed lines are told apart by their
+     background; removed text sits a shade brighter so it holds on the red. */
+  --code-bg: var(--bg);
+  --diff-add-bg: #233828;
+  --diff-add-fg: var(--fg);
+  --diff-add-chg: #2f5238;
+  --diff-del-bg: #3b2225;
+  --diff-del-fg: #e3e4e6;
+  --diff-del-chg: #5c2d32;
   font-family: "Segoe UI", Inter, system-ui, sans-serif;
   font-size: 13px;
   color: var(--fg);
@@ -56,7 +70,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); }
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
-  background: var(--bg2);
+  background: var(--bg3);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
@@ -149,6 +163,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-size: 11px;
   position: relative;
 }
+/* Buttons on the toolbar are flat: the band is already the lightest surface,
+   so a filled button would only blur into it. Hover lifts them a shade. */
+#topbar button { background: transparent; border-color: transparent; }
+#topbar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.07); border-color: transparent; }
 /* spinner on the active toolbar button */
 .tbtn.loading { pointer-events: none; }
 .tbtn.loading .tbi { visibility: hidden; }
@@ -358,7 +376,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   display: flex;
   gap: 2px;
   padding: 4px 8px 0;
-  background: var(--bg2);
+  background: var(--bar);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
   overflow-x: auto;
@@ -368,8 +386,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bar);
+  border: 1px solid transparent;
   border-bottom: none;
   border-radius: 6px 6px 0 0;
   cursor: pointer;
@@ -381,7 +399,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tab.active { background: var(--bg3); color: var(--fg); }
+.tab.active { background: var(--bg3); color: var(--fg); border-color: var(--border); }
 .tab.tab-sub { border-left: 2px solid var(--accent); }
 .tab.tab-dragging { opacity: 0.4; }
 .tab.tab-drop { box-shadow: -2px 0 0 0 var(--accent); }
@@ -1027,8 +1045,8 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .badge.local,
 .badge.remote,
 .badge.tag {
-  background: var(--bc-bg, #24313f);
-  border-color: var(--bc-bd, #33455a);
+  background: var(--bc-bg, #243038);
+  border-color: var(--bc-bd, #34464f);
   color: var(--fg);
 }
 /* tags are not branches — give them one fixed cream tone instead of the lane
@@ -1044,10 +1062,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .badge .ic { color: var(--bc, var(--muted)); opacity: 0.9; }
 /* remote-only pills read a touch lighter than checked-out ones */
 .badge.remote { border-style: dashed; }
-.badge.head { background: #e8e8ef; color: #0a0a12; font-weight: 700; }
+.badge.head { background: #e6e7e9; color: #0a0a12; font-weight: 700; }
 .badge.current {
-  background: #2f4460;
-  color: #cfe4ff;
+  background: #195f71;
+  color: #e6f6fa;
   outline: 1px solid var(--accent);
   font-weight: 700;
 }
@@ -1119,7 +1137,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-family: Consolas, monospace;
   font-size: 12px;
   line-height: 1.5;
-  background: var(--bg);
+  background: var(--code-bg);
 }
 #diff-main.with-worktree > #diffview-body { flex: 1 1 0; min-width: 0; }
 #worktree-view {
@@ -1139,7 +1157,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-bottom: 1px solid var(--border);
 }
 #worktree-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#worktree-body { flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 Consolas, monospace; }
+#worktree-body { flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 Consolas, monospace; background: var(--code-bg); }
 #worktree-body .worktree-message { padding: 12px; white-space: pre-wrap; }
 #worktree-head { flex-wrap: wrap; }
 #worktree-body:has(#worktree-edit-wrap) { overflow: hidden; }
@@ -1155,7 +1173,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   width: 100%; height: 100%; margin: 0; border: 0; padding: 12px;
   font: inherit; letter-spacing: normal; white-space: pre; tab-size: 4;
 }
-#worktree-edit-highlight { overflow: hidden; pointer-events: none; background: var(--bg); color: var(--fg); }
+#worktree-edit-highlight { overflow: hidden; pointer-events: none; background: var(--code-bg); color: var(--fg); }
 #worktree-editor { resize: none; outline: none; overflow: auto; background: transparent; color: transparent; caret-color: var(--fg); }
 #worktree-editor::selection { background: rgba(56, 139, 253, 0.4); color: transparent; }
 #diff-minimap {
@@ -1200,7 +1218,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #mergeview-title { font-family: Consolas, monospace; font-size: 13px; }
 .mv-actions { display: flex; gap: 6px; }
-#mergeview-body { flex: 1 1 auto; display: flex; min-height: 0; }
+#mergeview-body { flex: 1 1 auto; display: flex; min-height: 0; background: var(--code-bg); }
 .mv-pane {
   flex: 1 1 0;
   display: flex;
@@ -1246,7 +1264,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 .mv-inline-edit textarea {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg);
+  background: var(--code-bg);
   color: var(--fg);
   border: 1px solid var(--accent);
   border-radius: 4px;
@@ -1261,7 +1279,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 /* single-line in-place edit of a normal result line */
 .mv-line-edit {
   flex: 1 1 auto;
-  background: var(--bg);
+  background: var(--code-bg);
   color: var(--fg);
   border: 1px solid var(--accent);
   border-radius: 3px;
@@ -1291,7 +1309,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   font-size: 12px;
   line-height: 1.55;
   overflow: auto;
-  background: var(--bg);
+  background: var(--code-bg);
   color: var(--fg);
   border: none;
 }
@@ -1369,12 +1387,12 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   border-right: 1px solid var(--border);
 }
 .dl .dc { flex: 1 1 auto; padding: 0 12px; white-space: pre; }
-.dl.add { background: rgba(46, 160, 67, 0.16); }
-.dl.add .dc { color: #b5f0c0; }
-.dl.del { background: rgba(248, 81, 73, 0.16); }
-.dl.del .dc { color: #ffc0bc; }
+.dl.add { background: var(--diff-add-bg); }
+.dl.add .dc { color: var(--diff-add-fg); }
+.dl.del { background: var(--diff-del-bg); }
+.dl.del .dc { color: var(--diff-del-fg); }
 .dl.hunk {
-  background: linear-gradient(rgba(56, 139, 253, 0.12), rgba(56, 139, 253, 0.12)), var(--bg);
+  background: var(--bg2);
   align-items: center;
   padding: 2px 0;
   position: sticky;
@@ -1451,10 +1469,10 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 .bl.bl-top { border-top: 1px solid rgba(255,255,255,0.05); }
 .bl-ind { flex: 0 0 5px; background: transparent; align-self: stretch; }
-.bl.bl-added { background: rgba(63, 185, 80, 0.16); }
+.bl.bl-added { background: var(--diff-add-bg); }
 .bl.bl-added .bl-ind { background: #3fb950; }
-.bl.bl-added .dc { color: #b5f0c0; }
-.bl.bl-added:hover { background: rgba(63, 185, 80, 0.24); }
+.bl.bl-added .dc { color: var(--diff-add-fg); }
+.bl.bl-added:hover { background: rgba(63, 185, 80, 0.15); }
 .bl .ln { flex: 0 0 46px; text-align: right; padding: 0 8px; color: var(--muted); user-select: none; }
 .bl .dc { flex: 1 1 auto; padding: 0 10px; white-space: pre; }
 
@@ -1508,7 +1526,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   overflow: auto;
 }
 #dv-edithl {
-  background: var(--bg);
+  background: var(--code-bg);
   color: var(--fg);
   pointer-events: none; /* clicks belong to the textarea */
   overflow: hidden;     /* scrolled programmatically to match the textarea */
@@ -1524,7 +1542,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
 }
 #dv-edit::selection { background: rgba(56, 139, 253, 0.4); color: transparent; }
 /* fallback when highlighting is off (unknown language / very large file) */
-#dv-edit.plaintext { color: var(--fg); background: var(--bg); }
+#dv-edit.plaintext { color: var(--fg); background: var(--code-bg); }
 #dv-edit.plaintext::selection { color: var(--fg); }
 /* Line numbers sit in their own column to the left of both layers, scrolled
    along with them. Both layers start where it ends (--eln-w, measured once the
@@ -1543,7 +1561,7 @@ button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
   line-height: 1.5;
   text-align: right;
   color: var(--muted);
-  background: var(--bg);
+  background: var(--code-bg);
   border-right: 1px solid var(--border);
   overflow: hidden;
   user-select: none;
@@ -1611,7 +1629,7 @@ body.goto-armed .cpc { cursor: pointer; }
 /* where a jump landed — a moment of colour, then back to normal */
 .pl.jumped { background: rgba(109, 179, 255, 0.22); }
 .pl.jumped .plc { transition: background 1.2s ease-out; }
-::highlight(dvf-cur) { background: #ffd54f; color: #1a1a24; }
+::highlight(dvf-cur) { background: #ffd54f; color: #1c1e23; }
 
 /* image change preview */
 .imgdiff { display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
@@ -1634,19 +1652,19 @@ body.goto-armed .cpc { cursor: pointer; }
   justify-content: center;
   min-height: 160px;
   /* checkerboard so transparent images are visible */
-  background-color: #2a2a36;
+  background-color: #2a2d34;
   background-image:
-    linear-gradient(45deg, #20202a 25%, transparent 25%),
-    linear-gradient(-45deg, #20202a 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #20202a 75%),
-    linear-gradient(-45deg, transparent 75%, #20202a 75%);
+    linear-gradient(45deg, #23262b 25%, transparent 25%),
+    linear-gradient(-45deg, #23262b 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #23262b 75%),
+    linear-gradient(-45deg, transparent 75%, #23262b 75%);
   background-size: 20px 20px;
   background-position: 0 0, 0 10px, 10px -10px, -10px 0;
 }
 .imgwrap img { max-width: 100%; max-height: 60vh; image-rendering: auto; }
 /* exact changed characters within a line */
-.dl.add .chg { background: rgba(63, 185, 80, 0.45); border-radius: 2px; }
-.dl.del .chg { background: rgba(248, 81, 73, 0.45); border-radius: 2px; }
+.dl.add .chg { background: var(--diff-add-chg); border-radius: 2px; }
+.dl.del .chg { background: var(--diff-del-chg); border-radius: 2px; }
 
 /* line-level stage/unstage button (WIP diff view) */
 .dl.stg { position: relative; cursor: default; }
@@ -1731,8 +1749,8 @@ body.goto-armed .cpc { cursor: pointer; }
 }
 .cpc { flex: 1 1 50%; min-width: 0; padding: 0 10px; white-space: pre; overflow: hidden; }
 .cpc.l { border-right: 1px solid var(--border); }
-.cpc.del { background: rgba(248, 81, 73, 0.16); color: #ffc0bc; text-decoration: line-through; }
-.cpc.add { background: rgba(46, 160, 67, 0.16); color: #b5f0c0; }
+.cpc.del { background: var(--diff-del-bg); color: var(--diff-del-fg); text-decoration: line-through; }
+.cpc.add { background: var(--diff-add-bg); color: var(--diff-add-fg); }
 .cpc.loc { background: rgba(163, 113, 247, 0.14); color: #d2b6f7; }
 .cpc.empty {
   background: repeating-linear-gradient(45deg, transparent, transparent 5px,
@@ -1744,7 +1762,7 @@ body.goto-armed .cpc { cursor: pointer; }
 .cprow.cp-local:hover .cpc { filter: none; }
 /* picked rows: green, revert on click, draggable to move */
 .cprow.cp-done { cursor: grab; }
-.cprow.cp-done .cpc { background: rgba(46, 160, 67, 0.2); color: #b5f0c0; }
+.cprow.cp-done .cpc { background: rgba(46, 160, 67, 0.14); color: var(--diff-add-fg); }
 .cprow.cp-done .cpc.l::after { content: "  ¹3 picked"; color: #3fb950; font-size: 10px; }
 .cprow.cp-done:active { cursor: grabbing; }
 .cprow.cp-dragging { opacity: 0.35; }
@@ -1848,7 +1866,7 @@ body.goto-armed .cpc { cursor: pointer; }
 .fstatus.M { color: #e3b341; }
 .fstatus.D { color: #f85149; }
 .fstatus.R { color: #79c0ff; }
-.fstatus.Q { color: #9a9ab0; }
+.fstatus.Q { color: var(--muted); }
 
 /* commit panel */
 .cp-head {

@@ -40,6 +40,9 @@ const PAD = 14;
 // more branches than fit, the graph column scrolls sideways on its own instead
 // (see graphPanX), leaving the commit messages exactly where they are.
 const LANE_W = 20;
+// hollow nodes (merges, remote-only, stash, WIP) are filled with the graph's
+// own background, so they read as rings — keep in step with --bg
+const GRAPH_BG = "#17191d";
 const NODE_R = 5;
 const GRAPH_VIEW_MAX = 200; // widest the graph column gets before it scrolls
 const BRANCH_W = 170; // branch column, leftmost
@@ -1752,12 +1755,12 @@ function paintViewport() {
     const x = laneX(p.lane), y = rowY(p.row);
     const op = nodeOp(p.node.id);
     if (p.node.worktree) {
-      parts.push(`<g transform="translate(${x - 8} ${y - 8})" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="1.6" stroke-dasharray="2 2">${ICONS.worktree}</g>`);
+      parts.push(`<g transform="translate(${x - 8} ${y - 8})" fill="${GRAPH_BG}" stroke="${WIP_COLOR}" stroke-width="1.6" stroke-dasharray="2 2">${ICONS.worktree}</g>`);
     } else if (p.node.kind === "stash") {
       const sz = NODE_R * 2.2;
-      parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="#1e1e2a" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
+      parts.push(`<rect x="${x - sz / 2}" y="${y - sz / 2}" width="${sz}" height="${sz}" rx="2" fill="${GRAPH_BG}" stroke="${STASH_COLOR}" stroke-width="1.5" stroke-dasharray="2 2"${op}/>`);
     } else if (p.node.kind === "wip") {
-      parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="#1e1e2a" stroke="${WIP_COLOR}" stroke-width="2" stroke-dasharray="2 2"${op}/>`);
+      parts.push(`<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${GRAPH_BG}" stroke="${WIP_COLOR}" stroke-width="2" stroke-dasharray="2 2"${op}/>`);
     } else {
       const c = p.node.commit!;
       // A branch/tag TIP gets a labelled badge instead of a plain dot — a
@@ -1803,7 +1806,7 @@ function paintViewport() {
             `${ICONS[tip] ?? ""}</g>${title}</g>`
         );
       } else {
-        const fill = isMerge || remoteOnly ? "#1e1e2a" : p.color;
+        const fill = isMerge || remoteOnly ? GRAPH_BG : p.color;
         const dashed = remoteOnly ? ` stroke-dasharray="2.2 2"` : "";
         parts.push(
           `<circle cx="${x}" cy="${y}" r="${NODE_R}" fill="${fill}" stroke="${p.color}" stroke-width="2"${dashed}${op}>` +
